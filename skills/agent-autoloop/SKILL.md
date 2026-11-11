@@ -81,6 +81,8 @@ ACP 用 `use: "acp"` 和 `command: ["ACP 服务程序"]`，比如 Gemini CLI 是
 
 DeepSeek Harness 用 `use: "dsh"`，要 0.2.2 或更新（`npm install -g @deepseek-ai/dsh@next --allow-scripts=koffi,node-pty,@deepseek-ai/dsh-subprocess-local`，不放行这三个包的安装脚本，装完一跑就出错），能续接原会话、上报 Token（不报费用），报 `MISSING_CREDENTIAL` 时把密钥放进环境变量，`access` 对应它的权限档位；旧版用 README 里的普通命令接法。没有可打开的桌面链接。
 
+ZCode 用 `use: "zcode"`，跑随桌面版装的 CLI；Windows 上 `"program"` 指向它的 `zcode.cjs`，插件用 node 启动。能续接原会话、上报 Token（不报费用），`access` 对应它的模式（`read` 是 `plan`，`edit` 是 `edit`，`full` 是 `yolo`）；`model`、`effort` 用 ZCode 自己的设置。先跑一次 `zcode -p "hi"`，返回空就在 ZCode 里换一个能用的模型提供方。没有可打开的桌面链接。
+
 Claude 主任务要委托 Codex 操作网页时，从 `examples/recipes/browser-handoff/` 配置已验收的入口、目标与允许操作，保留返回的 Codex 子会话编号；受阻由主任务交 `ask`，恢复后只续办网页步骤。入口调用模板不提供浏览器连接，也不修改桌面应用或授权。
 
 网页任务使用 Agent 已配置的浏览器工具。需要专用入口时，在规则的 `prompt` 或 `skill` 写明已有命令和会话接续方式，只交网页步骤，业务和回执仍由主任务负责。不能假定后台 CLI 已接通桌面浏览器；用同一后台方式验收页面和接续，见 `docs/plugins.md` 的「浏览器接入」。
