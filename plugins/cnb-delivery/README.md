@@ -100,6 +100,11 @@ PR 打 deliver 标签 / 评论 @交付
 - **插件令牌（挂在仓库 Owner 名下）是 Owner 的 NPC**：`PUT /pulls/{n}/merge` 普通合并被
   「forbidden to approve pull request created by your own NPC」挡（2003024）；`force: true`（Owner 可用）可过。
   delivery.ts 的 gate() 在自行把关（blocked_on 等待）后才以 force 合并——门禁由状态机承担，README 特此注明。
+- **同一禁令也挡 PR 评审 approve**：reviews POST 的 approve 无论是否带 force 都被 2003024 拒
+  （这是历次 run 失败的真正根因，报错文案极具误导性——看似 merge 实为审查提交）；
+  **评论不受限**。通过/免审的评审结论改用 comment 提交（marker 机制不变），请求变更（request_changes）不受影响。
+- **blocked_on 语义**：`unblocked` = 无阻塞；真正的阻塞值是 status_check / waiting_review / code_conflict 等，
+  gate 判断时要显式排除 unblocked。
 - **run_events/sent 语义**：事件投递给 worker（sent:1）但 worker 被杀，重启后不会补投——该事件永久
   未处理；可靠做法是 cancel 卡住的 run 后重发一个新事件。中台 owner 密钥在 hub config.json（容器内可取），
   `POST /v1/runs/<id>/cancel` 用它。
