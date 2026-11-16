@@ -4,7 +4,13 @@
 //   "sources": { "cnbd": { "name": "CNB交付", "adapter": "cnb-delivery" } },
 // 并在 secrets.env 放 AGENT_AUTOLOOP_SECRET_CNBD=<与中继流水线一致的随机串>。
 import { createHash, timingSafeEqual } from "node:crypto";
-import { fit } from "../../worker/contract.ts";
+
+/** 字段截到限长且不劈开代理对（与 worker/contract.ts 的 fit 同一实现，内联保自包含） */
+const fit = (text: string, limit: number) => {
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit);
+  return /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut;
+};
 
 type Input = { headers: Record<string, string | string[] | undefined>; body: string; secret: string };
 
