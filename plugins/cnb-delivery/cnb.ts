@@ -55,7 +55,7 @@ export class Cnb {
     const response = await fetch(url, {
       method,
       headers: {
-        accept: "application/json",
+        accept: "application/vnd.cnb.api+json",
         authorization: `Bearer ${this.token}`,
         ...(body === undefined ? {} : { "content-type": "application/json" }),
       },
@@ -120,10 +120,15 @@ export class Cnb {
   }
 
   // 按事件名和提交查构建历史：发布核实靠它找到合并提交的部署构建，不依赖中继回传 sn
-  async builds(event: string, sha: string): Promise<Array<{ sn: string; status: string }>> {
-    const page = await this.api(`/../build/logs?event=${encodeURIComponent(event)}&sha=${sha}&page_size=10`);
+  async builds(event: string, sha: string): Promise<Array<{ sn: string; status: string; sha?: string }>> {
+    // 实测 sha 过滤参数不生效，拉回后由调用方按 b.sha 自行匹配
+    const page = await this.api(`/build/logs?event=${encodeURIComponent(event)}&page_size=20`);
     const items = Array.isArray(page) ? page : page?.data ?? page?.items ?? []; // 实测包装是 { total, totalCapped, data }
-    return items.map((item: any) => ({ sn: String(item.sn ?? item.serial_number ?? ""), status: String(item.status ?? "") }));
+    return items.map((item: any) => ({
+      sn: String(item.sn ?? item.serial_number ?? ""),
+      status: String(item.status ?? ""),
+      sha: item.sha ? String(item.sha) : undefined,
+    }));
   }
 
   // ---- 合并与分支 ----
@@ -166,7 +171,7 @@ export class Cnb {
   // 动态接口在 api 根下而非仓库作用域；date 格式 yy-mm-dd-h 或 yy-mm-dd（两位年！）
   async events(date: string): Promise<any[]> {
     const response = await fetch(`${this.apiBase}/events/${this.repo}/-/${date}`, {
-      headers: { accept: "application/json", authorization: `Bearer ${this.token}` },
+      headers: { accept: "application/vnd.cnb.api+json", authorization: `Bearer ${this.token}` },
       signal: AbortSignal.timeout(30_000),
     });
     const text = await response.text();

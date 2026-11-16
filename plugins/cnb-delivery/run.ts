@@ -66,10 +66,15 @@ export async function runWith(cnb: Cnb, repo: string): Promise<{ text: string; e
   } else if (config.review.command) {
     options.review = (input) => reviewByCommand(config.review.command!, input);
   }
-  // push 事件：subject 就是仓库，detail 里的 sha 直接进发布核实；其余按 PR 编号走状态机
+  // push 事件：subject 就是仓库，从事件的 sha/summary/detail 里提出提交号进发布核实；其余按 PR 编号走状态机
   const subjects = [...new Set((context.events ?? []).map((event: any) => String(event.subject ?? "")))];
   if (subjects.length === 1 && subjects[0] === repo) {
-    const sha = String(context.events.find((event: any) => event.sha)?.sha ?? "");
+    const sha = String(
+      context.events.find((event: any) => /^[a-f0-9]{7,40}$/.test(String(event.sha ?? "")))?.sha
+        ?? context.events.find((event: any) => /^[a-f0-9]{7,40}$/.test(String(event.summary ?? "")))?.summary
+        ?? context.events.map((event: any) => /提交：([a-f0-9]{7,40})/.exec(String(event.detail ?? ""))?.[1]).find(Boolean)
+        ?? "",
+    );
     if (!/^[a-f0-9]{7,40}$/.test(sha)) throw new Error("push 事件里没有可用的提交号");
     return await shipSha(cnb, config, sha, options);
   }

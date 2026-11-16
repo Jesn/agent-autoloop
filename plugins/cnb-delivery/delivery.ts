@@ -77,7 +77,7 @@ async function ship(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOptio
 export async function shipSha(cnb: Cnb, config: Settings, sha: string, options: DeliveryOptions, number = 0): Promise<Receipt> {
   const where = number ? `#${number} ` : `${sha.slice(0, 10)} `;
   const builds = await cnb.builds(config.ship.pipeline, sha);
-  const latest = builds[0];
+  const latest = builds.find((b) => b.sha === sha) ?? builds.find((b) => b.sha && (sha.startsWith(b.sha.slice(0, 10)) || b.sha.startsWith(sha.slice(0, 10))));
   if (!latest) return { text: `${where}还没有部署构建，等着`, exit: 2 };
   if (["pending", "running", ""].includes(latest.status)) return { text: `${where}部署构建进行中（${latest.sn}）`, exit: 2 };
   if (latest.status !== "success") {
