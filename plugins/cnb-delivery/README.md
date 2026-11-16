@@ -55,12 +55,21 @@ PR 打 deliver 标签 / 评论 @交付
 
 ## 里程碑
 
-- **M1**（本目录已有）：事件链路——source.ts 验收中继回调、cnb.ts API 客户端、relay 样例
-- **M2**：审查回写——review.ts 把审查结论转 reviews（含行级评论），免审判定
-- **M3**：合并与发布核实——state.ts 轮询 build/status + 健康接口 + commit-annotations 存发布版本
-- **M4**：NPC 路线——npc.ts 用 `POST /build/start`（`api_trigger_` + `npc:go`）召唤平台内审查，
-  对比自研审查的成本/质量后二选一
-- **M5**：仓库动态轮询兜底（poll.ts），防中继丢失
+- **M1 ✅** 事件链路——source.ts 验收中继回调、cnb.ts API 客户端、relay 样例（`ee9bf5d`）
+- **M2 ✅** 审查回写——review.ts 把审查结论转 reviews（含行级评论），免审判定（`5d2896c`）
+- **M3 ✅** 状态机 delivery.ts——回读驱动、门禁判定、squash 合并、发布核实与标注（`48865a4`）
+- **M4 ✅** NPC 路线——npc.ts 用 `api_trigger_` + `npc:go` 召唤平台审查，head 去重防重复派出，标记认领（`1946781`）
+- **M5 ✅** 兜底轮询——poll.ts 按小时拉仓库动态，归一成 relay 同形事件交回幂等管道（动态接口响应无 schema，鸭子类型保守归一，待真实 token 校准）
+
+## 接线（hub 侧，待做）
+
+1. **注册事件源**：worker 的 rules.json 加 `"sources": { "cnbd": { "name": "CNB交付", "adapter": "cnb-delivery" } }`，secrets.env 加 `AGENT_AUTOLOOP_SECRET_CNBD`；插件目录软链/拷贝进 worker 的 plugins/。
+2. **规则**：round 事件把 `pull_request*` / `push` 事件交给交付通道；round 的执行器里调 `deliverOnce(cnb, settings(repo), number, { review 或 npc })`，回执文本回飞书。
+3. **审查执行者二选一**：
+   - hub 自研：`options.review` 回调里拿审查输入派给 worker 的 agent，返回 findings JSON；
+   - 平台 NPC：`options.npc = { event: "api_trigger_delivery_review" }`，项目侧 `.cnb.yml` 配好 `npc:go` 流水线（提示词由 npc.ts 经 env 下发，角色只管照做）。
+4. **兜底轮询**：worker crontab 每小时跑 `pollOnce(cnb, repo)`，产出的事件直接喂回 hub 事件管道（id 幂等）。
+5. **试点**：`i.o/x` 仓库加 relay 流水线 + 分支保护（required_status_checks=check、评审数 ≥1）+ ops/delivery.json。
 
 ## 已知约束（来自 CNB 文档与 OpenAPI 实测）
 
