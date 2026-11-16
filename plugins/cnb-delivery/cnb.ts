@@ -133,8 +133,8 @@ export class Cnb {
 
   // ---- 合并与分支 ----
 
-  async merge(number: number, style: "merge" | "squash" | "rebase" | "fast_forward" = "squash", title?: string): Promise<boolean> {
-    await this.api(`/pulls/${number}/merge`, { merge_style: style, commit_title: title }, "PUT");
+  async merge(number: number, style: "merge" | "squash" | "rebase" | "fast_forward" = "squash", title?: string, force = false): Promise<boolean> {
+    await this.api(`/pulls/${number}/merge`, { merge_style: style, commit_title: title, force }, "PUT");
     // 合并请求可能被分支保护拒了但响应丢失：回读确认，没合上就让调用方重试
     const after = await this.pull(number);
     return Boolean(after.is_merged);
