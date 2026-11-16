@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cnb } from "./cnb.ts";
-import { deliverOnce, shipSha, type DeliveryOptions } from "./delivery.ts";
+import { commandReceipt, deliverOnce, parseCommand, shipSha, type DeliveryOptions } from "./delivery.ts";
 import { settings, type Settings } from "./project.ts";
 import { parseReview, reviewInput, type Finding } from "./review.ts";
 
@@ -65,6 +65,21 @@ export async function runWith(cnb: Cnb, repo: string): Promise<{ text: string; e
     options.npc = { event: process.env.CNB_NPC_EVENT, ...(process.env.CNB_NPC_ROLE ? { role: process.env.CNB_NPC_ROLE } : {}) };
   } else if (config.review.command) {
     options.review = (input) => reviewByCommand(config.review.command!, input);
+  }
+  // 评论指令：subject 形如 repo#N@cmd@…（独立于状态机事件，不挂退避 run）；
+  // 中继把指令正文放 detail，指令人放 summary/detail（评论人：xxx）
+  const esc = repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const cmdNumber = (subject: string) => Number(new RegExp(`^${esc}#(\\d+)@cmd@`).exec(subject)?.[1] ?? 0);
+  const cmdEvent = (context.events ?? []).find((event: any) => {
+    const text = `${event.summary ?? ""}\n${event.detail ?? ""}`;
+    return cmdNumber(String(event.subject ?? "")) > 0 && parseCommand(text) !== null;
+  });
+  if (cmdEvent) {
+    const text = `${cmdEvent.summary ?? ""}\n${cmdEvent.detail ?? ""}`;
+    const parsed = parseCommand(text)!;
+    const by = /评论人：(.+)/.exec(text)?.[1]?.trim() ?? /发起人：(.+)/.exec(text)?.[1]?.trim() ?? "";
+    const receipt = await commandReceipt(cnb, config, cmdNumber(String(cmdEvent.subject)), { ...parsed, by }, String((await cnb.pull(cmdNumber(String(cmdEvent.subject)))).head?.sha ?? ""), options);
+    return { text: receipt.text, exit: receipt.exit === 1 ? 1 : 0 };
   }
   // push 事件：subject 就是仓库，从事件的 sha/summary/detail 里提出提交号进发布核实；其余按 PR 编号走状态机
   const subjects = [...new Set((context.events ?? []).map((event: any) => String(event.subject ?? "")))];
