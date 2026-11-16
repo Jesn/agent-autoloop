@@ -1,0 +1,142 @@
+// api.cnb.cool 的零依赖客户端，只覆盖交付链路用到的接口。
+// 错误分类对齐 GitHub 版的习惯：可重试的（网络、5xx、限流）抛 CnbHiccup，
+// 终态拒绝的（冲突、检查失败）由状态机转成 refusal，不在这里重试。
+const HICCUP_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+export class CnbHiccup extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export type PullRef = { ref: string; sha: string };
+export type Pull = {
+  number: string;
+  state: "open" | "closed" | "merged";
+  title: string;
+  body: string;
+  labels: { name: string }[];
+  head: PullRef;
+  base: PullRef;
+  is_merged: boolean;
+  is_wip: boolean;
+  mergeable_state: "checking" | "mergeable" | "merging" | "merged" | "conflict" | "no-merge-base";
+  // 阻塞原因：no_merge_base | internal_error | code_conflict | status_check | waiting_review
+  blocked_on: string | null;
+  author: { id?: number; username?: string };
+};
+export type ReviewComment = { path: string; body: string; start_line?: number; end_line?: number; subject_type?: "line" | "file" };
+export type BuildStatus = { status: string; pipelinesStatus: Record<string, unknown>; npc?: unknown };
+
+export class Cnb {
+  readonly token: string;
+  readonly repo: string;
+  readonly apiBase: string;
+
+  constructor(token: string, repo: string, apiBase = "https://api.cnb.cool") {
+    this.token = token;
+    this.repo = repo;
+    this.apiBase = apiBase;
+  }
+
+  async api(path: string, body?: unknown, method = body === undefined ? "GET" : "POST"): Promise<any> {
+    const url = `${this.apiBase}/${this.repo}/-${path}`;
+    const response = await fetch(url, {
+      method,
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${this.token}`,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const text = await response.text();
+    const data = text ? JSON.parse(text) : null;
+    if (!response.ok) {
+      const message = typeof data?.message === "string" ? data.message : text.slice(0, 200);
+      if (HICCUP_STATUS.has(response.status)) throw new CnbHiccup(response.status, `${response.status} ${message}`);
+      throw new Error(`${response.status} ${message}`);
+    }
+    return data;
+  }
+
+  // ---- 合并请求 ----
+
+  pull(number: number): Promise<Pull> {
+    return this.api(`/pulls/${number}`);
+  }
+
+  labels(number: number): Promise<string[]> {
+    return this.api(`/pulls/${number}/labels`).then((items: any) => items.map((item: any) => item.name));
+  }
+
+  async addLabels(number: number, names: string[]): Promise<void> {
+    await this.api(`/pulls/${number}/labels`, { labels: names });
+  }
+
+  async removeLabel(number: number, name: string): Promise<void> {
+    // 删除丢失的响应要回读确认，不能当成已删（对齐 GitHub 版 clearLabels 的教训）
+    try {
+      await this.api(`/pulls/${number}/labels/${encodeURIComponent(name)}`, undefined, "DELETE");
+    } catch (error) {
+      const left = await this.labels(number);
+      if (left.includes(name)) throw error;
+    }
+  }
+
+  // ---- 评审（审查结论的门禁载体）----
+
+  review(number: number, event: "approve" | "request_changes" | "comment", body: string, comments: ReviewComment[] = []) {
+    return this.api(`/pulls/${number}/reviews`, { event, body, comments });
+  }
+
+  reviews(number: number): Promise<any[]> {
+    return this.api(`/pulls/${number}/reviews`);
+  }
+
+  // ---- 合并与分支 ----
+
+  async merge(number: number, style: "merge" | "squash" | "rebase" | "fast_forward" = "squash", title?: string): Promise<boolean> {
+    await this.api(`/pulls/${number}/merge`, { merge_style: style, commit_title: title }, "PUT");
+    // 合并请求可能被分支保护拒了但响应丢失：回读确认，没合上就让调用方重试
+    const after = await this.pull(number);
+    return Boolean(after.is_merged);
+  }
+
+  head(branch = "main"): Promise<string> {
+    return this.api(`/git/branches/${encodeURIComponent(branch)}`).then((b: any) => b.commit?.id ?? b.commit?.sha);
+  }
+
+  // head 是否已在 base 里：共同祖先就是 head 自己（CompareResponse.merge_base_commit）
+  async contains(base: string, head: string): Promise<boolean> {
+    const comparison = await this.api(`/git/compare/${base}...${head}`);
+    return comparison?.merge_base_commit?.sha === head;
+  }
+
+  // 发布元数据：比如 shipped=发布的版本号，waitLive 核实线上时回读
+  annotate(sha: string, entries: Record<string, string>): Promise<void> {
+    const annotations = Object.entries(entries).map(([key, value]) => ({ key, value }));
+    return this.api(`/git/commit-annotations/${sha}`, { annotations }, "PUT").then(() => undefined);
+  }
+
+  // ---- 构建（检查与部署流水线）----
+
+  startBuild(form: { event: string; branch?: string; sha?: string; env?: Record<string, string> }): Promise<{ sn: string }> {
+    return this.api("/build/start", form);
+  }
+
+  buildStatus(sn: string): Promise<BuildStatus> {
+    return this.api(`/build/status/${encodeURIComponent(sn)}`);
+  }
+
+  // ---- 仓库动态（轮询兜底）----
+
+  events(dateHour: string): Promise<any[]> {
+    return this.api(`/../events/${this.repo}/-/${dateHour}`);
+  }
+}
+
+
