@@ -40,7 +40,7 @@ CNB 流水线(.cnb.yml 中继)──webhook──▶ hub(/v1/in/cnbd)──rules
 |---|---|---|
 | `/autoloop retry` | 任何人 | 新起一轮状态机（指令走独立 subject，不被退避 run 压住） |
 | `/autoloop skip-review <理由>` | PR 作者或 admin_merge | 写入绑定提交号的免审声明评论 → 状态机识别 exempt 免审；推新提交后声明自动作废 |
-| `/autoloop rollback <sha>` | admin_merge（未配置时退到 PR 作者） | 目标提交打 `rollback-requested` 标注 + PR 评论回执；等仓库接回滚流水线（api_trigger）后自动执行 |
+| `/autoloop rollback <sha>` | admin_merge（未配置时退到 PR 作者） | 直接触发回滚流水线：startBuild 内联 YAML 在 main 头 revert 目标提交并推送，push 链路自动接力出新 shipped 标注；目标提交打 `rollback-triggered` 标注 + PR 评论回执带构建号 |
 
 执行结果都回复到 PR 评论里留痕。同一指令重放被幂等挡（防刷）。
 
