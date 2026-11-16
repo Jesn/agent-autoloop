@@ -87,8 +87,22 @@ PR 打 deliver 标签 / 评论 @交付
    `.cnb.yml` 加 relay 流水线（模板 relay.cnb.yml，token 用第 3 步的值），分支保护
    required_status_checks=check、评审数 ≥1。
 
-已实测打通：POST /v1/in/cnbd → 事件入总线 → 规则路由 → worker 起进程 run.ts → context.json 正常解析 →
-卡在预期位置（缺 CNB_TOKEN）。待 token 到位后填第 5/8 步。
+已实测打通（2026-11 全链路）：POST /v1/in/cnbd → 事件入总线 → 规则路由 → worker 起进程 run.ts →
+免审合并（force）→ push 中继 → shipSha 核实构建成功 → commit-annotations 写入 `shipped=<sha10>`。
+
+## 实测差异（ rich/test/autoloop_cnb 试点，代码已按此校准）
+
+- **CNB API 一律要 `Accept: application/vnd.cnb.api+json`**，否则 406（GET 也一样；cnb.ts 已内置）。
+- **没有 PR 编号环境变量**：`CNB_PULL_INDEX` 不存在；管道里有 `CNB_EVENT_URL`（形如 `.../-/pulls/1`），
+  编号取 `${CNB_EVENT_URL##*/}`。`CNB_COMMIT` 在 PR 管道里就是源分支头 sha（不是合并预览 sha）。
+- **build/logs 的 sha 过滤参数不生效**且返回的 `sha` 是 12 位短前缀 → cnb.ts 拉回 20 条由调用方
+  前缀匹配；事件 API 是 NDJSON、路径 `/events/{repo}/-/{yyyy-MM-dd-H}`（北京时间小时）。
+- **插件令牌（挂在仓库 Owner 名下）是 Owner 的 NPC**：`PUT /pulls/{n}/merge` 普通合并被
+  「forbidden to approve pull request created by your own NPC」挡（2003024）；`force: true`（Owner 可用）可过。
+  delivery.ts 的 gate() 在自行把关（blocked_on 等待）后才以 force 合并——门禁由状态机承担，README 特此注明。
+- **run_events/sent 语义**：事件投递给 worker（sent:1）但 worker 被杀，重启后不会补投——该事件永久
+  未处理；可靠做法是 cancel 卡住的 run 后重发一个新事件。中台 owner 密钥在 hub config.json（容器内可取），
+  `POST /v1/runs/<id>/cancel` 用它。
 
 ## 已知约束（来自 CNB 文档与 OpenAPI 实测）
 

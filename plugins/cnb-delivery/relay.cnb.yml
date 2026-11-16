@@ -1,60 +1,58 @@
 # 用户 CNB 项目的 .cnb.yml 片段：把交付相关事件中继到 agent-autoloop 中台。
-# 用法：把这两段合进项目自己的 .cnb.yml；环境变量 HUB_URL、HUB_TOKEN 建议
+# 用法：把这几段合进项目自己的 .cnb.yml（缩进对齐 main: 下）；HUB_TOKEN 建议
 # 通过 imports 引用密钥仓库注入，不要硬编码。
 #
-# 中继打给中台的 body 字段与 plugins/cnb-delivery/source.ts 的 Relay 类型对应。
+# 实测要点（rich/test/autoloop_cnb 试点验证过）：
+# - CNB 没有给出 PR 编号环境变量（CNB_PULL_INDEX 不存在）；编号从 CNB_EVENT_URL
+#   末段提取（形如 https://cnb.cool/<repo>/-/pulls/1）。
+# - $CNB_COMMIT 在 PR 管道里就是源分支头 sha（不是合并预览 sha）。
+# - 无 Accept: application/vnd.cnb.api+json 时 API 一律 406，中继走的是
+#   webhook 不受影响，但同管道里调 API 的脚本要带这个头。
+#
+# 中继 body 字段与 plugins/cnb-delivery/source.ts 的 Relay 类型对应。
 
 main:
-  # PR 全生命周期：hub 按 subject（仓库#编号）聚合同一 PR 的事件
+  # PR 建立/重开：hub 按 subject（仓库#编号）聚合同一 PR 的事件
   pull_request:
     - stages:
         - name: relay-to-hub
-          image: tencentcom/curl
           env:
-            HUB_URL: https://hub.example.com/webhook/cnbd
+            HUB_URL: https://hub.example.com/v1/in/cnbd
             HUB_TOKEN: $AGENT_AUTOLOOP_SECRET_CNBD # 从 imports 注入
           script: |
+            NUM="${CNB_EVENT_URL##*/}"
             curl -fsS -X POST "$HUB_URL" \
               -H "x-cnb-token: $HUB_TOKEN" \
               -H "content-type: application/json" \
-              -d "{
-                \"event\": \"pull_request\",
-                \"repo\": \"$CNB_REPO_SLUG\",
-                \"number\": $CNB_PULL_INDEX,
-                \"title\": $(echo "$CNB_PULL_REQUEST_TITLE" | jq -Rs .),
-                \"sha\": \"$CNB_COMMIT\",
-                \"branch\": \"$CNB_BRANCH\",
-                \"url\": \"$CNB_EVENT_URL\",
-                \"proposer\": \"$CNB_PULL_REQUEST_PROPOSER\",
-                \"at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
-              }"
+              -d "{\"event\":\"pull_request\",\"repo\":\"$CNB_REPO_SLUG\",\"number\":\"$NUM\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"$CNB_BRANCH\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+
+  # PR 有新提交（synchronize）：通知 hub 更新同一 PR 的状态机
   pull_request.update:
     - stages:
         - name: relay-to-hub
-          image: tencentcom/curl
           env:
-            HUB_URL: https://hub.example.com/webhook/cnbd
+            HUB_URL: https://hub.example.com/v1/in/cnbd
             HUB_TOKEN: $AGENT_AUTOLOOP_SECRET_CNBD
           script: |
+            NUM="${CNB_EVENT_URL##*/}"
             curl -fsS -X POST "$HUB_URL" \
               -H "x-cnb-token: $HUB_TOKEN" -H "content-type: application/json" \
-              -d "{\"event\":\"pull_request.update\",\"repo\":\"$CNB_REPO_SLUG\",\"number\":$CNB_PULL_INDEX,\"title\":$(echo "$CNB_PULL_REQUEST_TITLE" | jq -Rs .),\"sha\":\"$CNB_COMMIT\",\"url\":\"$CNB_EVENT_URL\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+              -d "{\"event\":\"pull_request.update\",\"repo\":\"$CNB_REPO_SLUG\",\"number\":\"$NUM\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"$CNB_BRANCH\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 
   # 合并进 main：通知 hub 进入「等发布、核实线上」阶段
   push:
     - branch-filter: [main]
       stages:
-        - name: relay-merged
-          image: tencentcom/curl
+        - name: relay-to-hub
           env:
-            HUB_URL: https://hub.example.com/webhook/cnbd
+            HUB_URL: https://hub.example.com/v1/in/cnbd
             HUB_TOKEN: $AGENT_AUTOLOOP_SECRET_CNBD
           script: |
             curl -fsS -X POST "$HUB_URL" \
               -H "x-cnb-token: $HUB_TOKEN" -H "content-type: application/json" \
-              -d "{\"event\":\"push\",\"repo\":\"$CNB_REPO_SLUG\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"main\",\"url\":\"$CNB_EVENT_URL\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+              -d "{\"event\":\"push\",\"repo\":\"$CNB_REPO_SLUG\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"main\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 
-  # 部署流水线（示例）：真正的构建发布在这里做，hub 靠 build/status + 健康接口核实
+  # 部署流水线（示例）：真正的构建发布在这里做，hub 靠 build/logs + 健康接口核实
   # api_trigger_deploy:
   #   - stages:
   #       - name: deploy
