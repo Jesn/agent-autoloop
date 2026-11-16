@@ -208,11 +208,13 @@ export async function commandReceipt(
   if (cmd === "rollback" && !admin)
     return await refuse(cnb, number, `回滚只有管理员（${admins.join(", ")}）能发起，${by || "未知账号"} 不在名单里`);
   if (cmd === "rollback") {
-    if (!/^[a-f0-9]{7,40}$/.test(arg))
+    // 事件 detail 是多行的（后面跟评论人等元信息），提交号取首词
+    const sha = arg.split(/\s+/)[0] ?? "";
+    if (!/^[a-f0-9]{7,40}$/.test(sha))
       return await refuse(cnb, number, "回滚指令要带提交号：/autoloop rollback <sha>");
-    await cnb.annotate(arg, { "rollback-requested": `${head.slice(0, 10)} by ${by}` });
-    await cnb.createComment(number, `已登记回滚请求：目标 ${arg.slice(0, 10)}，登记人 ${by}。等仓库的回滚流水线（api_trigger）接上后自动执行。`);
-    return { text: `#${number} 回滚请求已登记（${arg.slice(0, 10)}，by ${by}）`, exit: 0 };
+    await cnb.annotate(sha, { "rollback-requested": `${head.slice(0, 10)} by ${by}` });
+    await cnb.createComment(number, `已登记回滚请求：目标 ${sha.slice(0, 10)}，登记人 ${by}。等仓库的回滚流水线（api_trigger）接上后自动执行。`);
+    return { text: `#${number} 回滚请求已登记（${sha.slice(0, 10)}，by ${by}）`, exit: 0 };
   }
   if (cmd === "skip-review") {
     if (!admin && pr.author?.username !== by)
