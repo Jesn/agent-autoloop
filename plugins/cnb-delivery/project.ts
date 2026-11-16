@@ -31,7 +31,7 @@ export type Live = { sha: string; release: string };
 
 /** 不是可执行位也不是软链的普通文件模式；只有这类改动可以免审免发布 */
 export const PLAIN_FILE_MODES = ["000000", "100644"];
-const REPO = /^[\w.-]+\/[\w.-]+$/;
+const REPO = /^[\w.-]+(\/[\w.-]+)+$/; // CNB 支持嵌套群组（org/group/repo）
 const isWords = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((word) => typeof word === "string" && word.length > 0);
 const isPaths = (value: unknown) =>

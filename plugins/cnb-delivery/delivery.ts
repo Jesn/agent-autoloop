@@ -68,27 +68,32 @@ async function gate(cnb: Cnb, config: Settings, pr: Pull): Promise<Receipt> {
 }
 
 /** 发布核实：按合并提交 sha 查部署构建，构建成功再核线上版本，对上才标发布 */
+/** 发布核实：按合并提交 sha 查部署构建，构建成功再核线上版本，对上才标发布。
+ * PR 合并后走 ship()，push 中继事件没有 PR 编号时走 shipSha() 直接按提交核。 */
 async function ship(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOptions): Promise<Receipt> {
-  const number = Number(pr.number);
-  const sha = pr.head.sha; // 合并后 head 即合并提交
+  return shipSha(cnb, config, pr.head.sha, options, Number(pr.number));
+}
+
+export async function shipSha(cnb: Cnb, config: Settings, sha: string, options: DeliveryOptions, number = 0): Promise<Receipt> {
+  const where = number ? `#${number} ` : `${sha.slice(0, 10)} `;
   const builds = await cnb.builds(config.ship.pipeline, sha);
   const latest = builds[0];
-  if (!latest) return { text: `#${number} 合并提交 ${sha.slice(0, 10)} 还没有部署构建，等着`, exit: 2 };
-  if (["pending", "running", ""].includes(latest.status)) return { text: `#${number} 部署构建进行中（${latest.sn}）`, exit: 2 };
+  if (!latest) return { text: `${where}还没有部署构建，等着`, exit: 2 };
+  if (["pending", "running", ""].includes(latest.status)) return { text: `${where}部署构建进行中（${latest.sn}）`, exit: 2 };
   if (latest.status !== "success") {
-    const text = `#${number} 部署构建失败（${latest.sn} 状态 ${latest.status}），发布未生效`;
+    const text = `${where}部署构建失败（${latest.sn} 状态 ${latest.status}），发布未生效`;
     options.notify?.(text);
     return { text, exit: 1 };
   }
   if (!config.health) {
     await cnb.annotate(sha, { shipped: sha.slice(0, 10) });
-    return { text: `#${number} 已发布（构建 ${latest.sn} 成功，项目没配健康核实）`, exit: 0 };
+    return { text: `${where}已发布（构建 ${latest.sn} 成功，项目没配健康核实）`, exit: 0 };
   }
   const live = await liveRelease(config);
-  if (live.sha !== sha && !sha.startsWith(live.sha) && !live.sha.startsWith(sha.slice(0, 10)))
-    return { text: `#${number} 线上版本还没到 ${sha.slice(0, 10)}，等发布生效`, exit: 2 };
+  if (!live || (live.sha !== sha && !sha.startsWith(live.sha) && !live.sha.startsWith(sha.slice(0, 10))))
+    return { text: `${where}线上版本还没到 ${sha.slice(0, 10)}，等发布生效`, exit: 2 };
   await cnb.annotate(sha, { shipped: live.release.slice(0, 200) });
-  return { text: `#${number} 已发布并核实（${live.release}）`, exit: 0 };
+  return { text: `${where}已发布并核实（${live.release}）`, exit: 0 };
 }
 
 export async function deliverOnce(cnb: Cnb, config: Settings, number: number, options: DeliveryOptions = {}): Promise<Receipt> {

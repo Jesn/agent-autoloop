@@ -3,20 +3,24 @@
 // 审查执行者按优先级：CNB_NPC_EVENT（平台 NPC 路线）> review.command（项目自定命令）> 拒绝。
 // 环境变量：CNB_TOKEN（api.cnb.cool 的访问令牌，必填）；CNB_NPC_EVENT / CNB_NPC_ROLE（NPC 路线，可选）。
 import { execFile } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cnb } from "./cnb.ts";
-import { deliverOnce, type DeliveryOptions } from "./delivery.ts";
+import { deliverOnce, shipSha, type DeliveryOptions } from "./delivery.ts";
 import { settings, type Settings } from "./project.ts";
 import { parseReview, reviewInput, type Finding } from "./review.ts";
 
-export function subjectNumber(context: any, repo: string): number {
-  const subject = String(context?.subject ?? "");
-  const prefix = `${repo}#`;
-  if (!subject.startsWith(prefix)) throw new Error(`事件主题 ${subject} 不是 ${repo} 的合并请求`);
-  const number = Number(subject.slice(prefix.length).split(/[^0-9]/)[0]);
-  if (!Number.isSafeInteger(number) || number < 1) throw new Error(`事件主题 ${subject} 里没有合并请求编号`);
+// 与上游 delivery/input.ts 同一约定：context.events 的 subject 必须都指向同一事项；
+// push 事件的 subject 就是仓库名（无编号），走发布核实。
+export function subjectNumber<E extends { subject: string }>(repo: string, context: { events: E[] }): number {
+  const subjects = [...new Set(context.events.map((event) => event.subject))];
+  const suffix = subjects[0]?.slice(repo.length + 1);
+  if (subjects.length !== 1 || !subjects[0].startsWith(`${repo}#`) || !/^[1-9]\d*$/.test(suffix)) {
+    throw new Error("事件没有指向规则指定仓库的同一个事项");
+  }
+  const number = Number(suffix);
+  if (!Number.isSafeInteger(number)) throw new Error("事项编号不正确");
   return number;
 }
 
@@ -48,8 +52,13 @@ async function reviewByCommand(command: string[], input: { diff: string; prompt:
 export async function run(repo: string, argv = process.argv): Promise<{ text: string; exit: number }> {
   const token = process.env.CNB_TOKEN;
   if (!token) throw new Error("环境里没有 CNB_TOKEN，无法访问 api.cnb.cool");
-  const number = subjectNumber(JSON.parse(process.env.AGENT_AUTOLOOP_CONTEXT ?? "{}"), repo);
-  const cnb = new Cnb(token, repo);
+  return runWith(new Cnb(token, repo), repo);
+}
+
+export async function runWith(cnb: Cnb, repo: string): Promise<{ text: string; exit: number }> {
+  const contextPath = process.env.AGENT_AUTOLOOP_CONTEXT;
+  if (!contextPath) throw new Error("没有 AGENT_AUTOLOOP_CONTEXT，只能由中台派活时运行");
+  const context = JSON.parse(readFileSync(contextPath, "utf8"));
   const config: Settings = settings(JSON.parse(await cnb.file("main", "ops/delivery.json")));
   const options: DeliveryOptions = {};
   if (process.env.CNB_NPC_EVENT) {
@@ -57,13 +66,20 @@ export async function run(repo: string, argv = process.argv): Promise<{ text: st
   } else if (config.review.command) {
     options.review = (input) => reviewByCommand(config.review.command!, input);
   }
-  const receipt = await deliverOnce(cnb, config, number, options);
+  // push 事件：subject 就是仓库，detail 里的 sha 直接进发布核实；其余按 PR 编号走状态机
+  const subjects = [...new Set((context.events ?? []).map((event: any) => String(event.subject ?? "")))];
+  if (subjects.length === 1 && subjects[0] === repo) {
+    const sha = String(context.events.find((event: any) => event.sha)?.sha ?? "");
+    if (!/^[a-f0-9]{7,40}$/.test(sha)) throw new Error("push 事件里没有可用的提交号");
+    return await shipSha(cnb, config, sha, options);
+  }
+  const receipt = await deliverOnce(cnb, config, subjectNumber(repo, context), options);
   return { text: receipt.text, exit: receipt.exit === 1 ? 1 : 0 };
 }
 
 if (import.meta.main) {
   const repo = process.argv[2];
-  if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("用法：node run.ts <owner/name>");
+  if (!repo || !/^[\w.-]+(\/[\w.-]+)+$/.test(repo)) throw new Error("用法：node run.ts <owner/name 或 org/group/name>");
   run(repo, process.argv)
     .then(({ text, exit }) => {
       console.log(text);
