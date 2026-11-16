@@ -62,8 +62,17 @@ async function gate(cnb: Cnb, config: Settings, pr: Pull): Promise<Receipt> {
   }
   // 插件令牌挂在仓库 Owner 名下 = Owner 的 NPC，普通合并被自批禁令挡（2003024）；
   // force 仅 Owner 可用，门禁仍由上面的 blocked_on/mergeable 检查先行把关。
-  // 实测 squash 合并 commit_title 必填（缺了报 400），按平台默认格式补「{title} (#N)」
-  const merged = await cnb.merge(number, "squash", `${pr.title} (#${number})`, true);
+  // 实测 squash 合并 commit_title 必填（缺了报 400），按平台默认格式补「{title} (#N)」；
+  // 另实测：检查流水线还在跑时 merge 也会报同一个 2003024（CNB 内部先补审）——
+  // 文案有误导，当门禁等待处理，下一轮重试自然过
+  let merged: boolean;
+  try {
+    merged = await cnb.merge(number, "squash", `${pr.title} (#${number})`, true);
+  } catch (error) {
+    if (String(error).includes("2003024"))
+      return { text: `#${number} 门禁还没放行（检查流水线可能没跑完），下一轮再看`, exit: 2 };
+    throw error;
+  }
   if (!merged) return { text: `#${number} 合并没生效（门禁或并发），下一轮再看`, exit: 2 };
   await cnb.removeLabel(number, "deliver");
   await cnb.removeLabel(number, "deliver-review");
