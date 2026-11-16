@@ -28,6 +28,15 @@ export type Pull = {
   author: { id?: number; username?: string };
 };
 export type ReviewComment = { path: string; body: string; start_line?: number; end_line?: number; subject_type?: "line" | "file" };
+// 分支改动文件的清单项，只列用到的字段；mode 取值同 git raw（100644 普通文件、100755 可执行、120000 软链、000000 删除）
+export type DiffFile = {
+  path: string;
+  previous_filename?: string;
+  mode?: string;
+  previous_mode?: string;
+  status?: string;
+  patch?: string;
+};
 export type BuildStatus = { status: string; pipelinesStatus: Record<string, unknown>; npc?: unknown };
 
 export class Cnb {
@@ -95,6 +104,26 @@ export class Cnb {
 
   reviews(number: number): Promise<any[]> {
     return this.api(`/pulls/${number}/reviews`);
+  }
+
+  // 分支自己改动的文件清单（带 path/mode/status/patch），免审判定和审查输入都从这里来
+  files(number: number): Promise<DiffFile[]> {
+    return this.api(`/pulls/${number}/files`);
+  }
+
+  // 读 main 上的审查要点等仓库内文件；响应里的 content 是 base64（GitHub 风格），
+  // 某些版本可能直接给明文，两种都兼容
+  async file(ref: string, path: string): Promise<string> {
+    const content = await this.api(`/git/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(ref)}`);
+    const text = String(content?.content ?? "");
+    return content?.encoding === "base64" ? Buffer.from(text, "base64").toString("utf8") : text;
+  }
+
+  // 按事件名和提交查构建历史：发布核实靠它找到合并提交的部署构建，不依赖中继回传 sn
+  async builds(event: string, sha: string): Promise<Array<{ sn: string; status: string }>> {
+    const page = await this.api(`/../build/logs?event=${encodeURIComponent(event)}&sha=${sha}&page_size=10`);
+    const items = Array.isArray(page) ? page : page?.items ?? [];
+    return items.map((item: any) => ({ sn: String(item.sn ?? item.serial_number ?? ""), status: String(item.status ?? "") }));
   }
 
   // ---- 合并与分支 ----

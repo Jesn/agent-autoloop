@@ -1,22 +1,17 @@
 // 合并前的审查：范围判定用 CNB 的 files 接口（自带 path/mode/status，不需要 clone 仓库），
 // 结论回写成 PR reviews —— approve 放行、request_changes 挡合并，分支保护把评审数当门禁。
 // 审查输入是分支自己改动的补丁文本快照：不 checkout、不执行 PR 里的任何东西。
-import type { ReviewComment, Cnb } from "./cnb.ts";
+import type { ReviewComment, Cnb, DiffFile } from "./cnb.ts";
 import { matches, PLAIN_FILE_MODES, type Settings } from "./project.ts";
 
-export type Finding = { title: string; text: string };
-/** 审查发现的问题，或项目设置放行时说明放行给了谁。形状与 GitHub 版一致。 */
-export type Reviewed = Finding[] | { exempt: string } | { blocked: string } | { changed: true } | { docsOnly: true };
+export type { DiffFile };
 
-/** CNB files 接口的一个文件，只列用到的字段 */
-export type DiffFile = {
-  path: string;
-  previous_filename?: string;
-  mode?: string;
-  previous_mode?: string;
-  status?: string;
-  patch?: string;
-};
+export type Finding = { title: string; text: string };
+/** 审查发现的问题，或项目设置放行/暂等时说明缘由。形状与 GitHub 版一致，waiting 是 CNB 特有：
+ * 自己上一轮的 request_changes 还压在这个 head 上，等作者修复即可，不撤标签不退回。 */
+export type Reviewed = Finding[] | { exempt: string } | { blocked: string } | { changed: true } | { docsOnly: true } | { waiting: string };
+
+/** CNB files 接口的一个文件 */
 
 export function parseReview(text: string): Finding[] {
   const value = JSON.parse(text);
@@ -108,11 +103,13 @@ export function renderVerdict(verdict: Reviewed): { event: "approve" | "request_
   return { event: "comment", body: "", comments: [] } as never;
 }
 
-/** 把结论提交成 PR 评审。提交前回读 PR 防漂移：head 变了或已合并，本轮作废由状态机重开。 */
-export async function submitVerdict(cnb: Cnb, number: number, head: string, verdict: Reviewed): Promise<{ review: number } | { changed: true }> {
+/** 把结论提交成 PR 评审。marker（如「交付审查（a1b2c3d4e5）」）写进 body 开头：CNB 的评审
+ * 不绑定 commit，状态机靠它认出哪个 head 已经有结论。提交前回读 PR 防漂移：head 变了或已合并，本轮作废由状态机重开。 */
+export async function submitVerdict(cnb: Cnb, number: number, head: string, verdict: Reviewed, marker?: string): Promise<{ review: number } | { changed: true }> {
   const latest = await cnb.pull(number);
   if (latest.state !== "open" || latest.head.sha !== head) return { changed: true };
   const submission = renderVerdict(verdict);
-  const review = await cnb.review(number, submission.event, submission.body, submission.comments);
+  const body = marker ? `${marker}\n\n${submission.body}` : submission.body;
+  const review = await cnb.review(number, submission.event, body, submission.comments);
   return { review: Number(review?.id ?? 0) };
 }
