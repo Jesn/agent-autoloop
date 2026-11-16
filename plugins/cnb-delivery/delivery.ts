@@ -39,6 +39,8 @@ async function verdict(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOp
   const files = await cnb.files(number);
   const scope = scopeFromFiles(files, config);
   if (!scope.needsReview) return { docsOnly: true };
+  const skip = await findSkipReview(cnb, config, number, pr.head.sha, String(pr.author?.username ?? ""));
+  if (skip) return { exempt: skip };
   const prior = await ownReview(cnb, number, pr.head.sha);
   if (prior)
     return prior.state === "approved"
@@ -48,6 +50,18 @@ async function verdict(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOp
   const points = await cnb.file("main", config.review.points);
   const input = reviewInput(files, points, pr.body || undefined);
   return await options.review(input);
+}
+
+// 作者显式免审声明（/autoloop skip-review 指令写入，绑定提交号）：推新提交后声明自动作废
+const SKIP_MARK = (head: string) => `交付免审（${head.slice(0, 10)}）：`;
+async function findSkipReview(cnb: Cnb, config: Settings, number: number, head: string, author = ""): Promise<string | null> {
+  const comments = await cnb.comments(number);
+  const mark = SKIP_MARK(head);
+  const hit = comments.filter((comment) => typeof comment.body === "string" && comment.body.startsWith(mark)).at(-1);
+  if (!hit) return null;
+  const by = /声明人：(.+)/.exec(hit.body)?.[1]?.trim();
+  if (!by || (by !== author && !config.admin_merge.includes(by))) return null;
+  return by;
 }
 
 /** 合并门禁：分支保护在平台上挡着的（waiting_review/status_check）交回去等，冲突退回作者 */
@@ -160,4 +174,58 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
     }
     throw error;
   }
+}
+
+// ---------- 评论指令通道 ----------
+// PR 里评论 /autoloop <cmd>，经中继进 hub 后路由到独立 subject（repo#N@cmd@…）——
+// 不挂到状态机的退避 run 上，指令即刻新起一轮。
+
+export type Command = { cmd: "retry" | "skip-review" | "rollback"; arg: string; by: string };
+
+/** 从中继事件的 detail/summary 里解出指令；不是指令返回 null */
+export function parseCommand(text: string): { cmd: Command["cmd"]; arg: string } | null {
+  const hit = /^\s*\/autoloop\s+(\S+)(?:\s+([\s\S]+))?$/m.exec(text);
+  if (!hit) return null;
+  const cmd = hit[1].toLowerCase();
+  if (cmd !== "retry" && cmd !== "skip-review" && cmd !== "rollback") return null;
+  return { cmd, arg: (hit[2] ?? "").trim() };
+}
+
+/** 执行一条评论指令。commenter 是发评论的账号；by 回执正文在 reply 里同步到 PR */
+export async function commandReceipt(
+  cnb: Cnb,
+  config: Settings,
+  number: number,
+  command: Command,
+  head: string,
+  options: DeliveryOptions = {},
+): Promise<Receipt> {
+  const { cmd, arg, by } = command;
+  // admin_merge 未配置时退到 PR 作者可发起（配置名单后仅限名单）
+  const pr = await cnb.pull(number);
+  const admins = config.admin_merge.length ? config.admin_merge : [String(pr.author?.username ?? "")];
+  const admin = admins.includes(by);
+  if (cmd === "rollback" && !admin)
+    return await refuse(cnb, number, `回滚只有管理员（${admins.join(", ")}）能发起，${by || "未知账号"} 不在名单里`);
+  if (cmd === "rollback") {
+    if (!/^[a-f0-9]{7,40}$/.test(arg))
+      return await refuse(cnb, number, "回滚指令要带提交号：/autoloop rollback <sha>");
+    await cnb.annotate(arg, { "rollback-requested": `${head.slice(0, 10)} by ${by}` });
+    await cnb.createComment(number, `已登记回滚请求：目标 ${arg.slice(0, 10)}，登记人 ${by}。等仓库的回滚流水线（api_trigger）接上后自动执行。`);
+    return { text: `#${number} 回滚请求已登记（${arg.slice(0, 10)}，by ${by}）`, exit: 0 };
+  }
+  if (cmd === "skip-review") {
+    if (!admin && pr.author?.username !== by)
+      return await refuse(cnb, number, `免审声明只有 PR 作者或管理员能发，${by || "未知账号"} 不行`);
+    await cnb.createComment(number, `${SKIP_MARK(head)}${arg || "作者显式免审"}\n声明人：${by}`);
+    // 声明落库后直接跑一轮状态机：verdict 会认到声明走 exempt
+  }
+  // retry：什么都不用做，重新走状态机就是重试；skip-review 已写声明，同样接着走
+  const receipt = await deliverOnce(cnb, config, number, options);
+  return receipt;
+}
+
+async function refuse(cnb: Cnb, number: number, why: string): Promise<Receipt> {
+  await cnb.createComment(number, `指令被拒：${why}`).catch(() => {});
+  return { text: why, exit: 1 };
 }
