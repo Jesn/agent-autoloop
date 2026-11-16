@@ -61,15 +61,34 @@ PR 打 deliver 标签 / 评论 @交付
 - **M4 ✅** NPC 路线——npc.ts 用 `api_trigger_` + `npc:go` 召唤平台审查，head 去重防重复派出，标记认领（`1946781`）
 - **M5 ✅** 兜底轮询——poll.ts 按小时拉仓库动态，归一成 relay 同形事件交回幂等管道（动态接口响应无 schema，鸭子类型保守归一，待真实 token 校准）
 
-## 接线（hub 侧，待做）
+## 接线（已在本机 hub+worker 验证，2026-11）
 
-1. **注册事件源**：worker 的 rules.json 加 `"sources": { "cnbd": { "name": "CNB交付", "adapter": "cnb-delivery" } }`，secrets.env 加 `AGENT_AUTOLOOP_SECRET_CNBD`；插件目录软链/拷贝进 worker 的 plugins/。
-2. **规则**：round 事件把 `pull_request*` / `push` 事件交给交付通道；round 的执行器里调 `deliverOnce(cnb, settings(repo), number, { review 或 npc })`，回执文本回飞书。
-3. **审查执行者二选一**：
-   - hub 自研：`options.review` 回调里拿审查输入派给 worker 的 agent，返回 findings JSON；
-   - 平台 NPC：`options.npc = { event: "api_trigger_delivery_review" }`，项目侧 `.cnb.yml` 配好 `npc:go` 流水线（提示词由 npc.ts 经 env 下发，角色只管照做）。
-4. **兜底轮询**：worker crontab 每小时跑 `pollOnce(cnb, repo)`，产出的事件直接喂回 hub 事件管道（id 幂等）。
-5. **试点**：`i.o/x` 仓库加 relay 流水线 + 分支保护（required_status_checks=check、评审数 ≥1）+ ops/delivery.json。
+实际部署好的形态（hub = Docker 容器 agent-autoloop，`AGENT_AUTOLOOP_HOME=/data`；worker = 宿主机 darren-pc）：
+
+1. **插件就位（两处都要）**：hub 拷进卷内 `/data/plugins/cnb-delivery/`，worker 拷进
+   `~/.agent-autoloop/plugins/cnb-delivery/`（HOME/plugins 优先于 app 自带，这是官方插件挂载点；插件自包含，不引上级目录）。
+2. **rules.json（hub 的 /data/rules.json）三处**：
+   - `"sources": { "cnbd": { "name": "CNB交付", "adapter": "cnb-delivery" } }`；
+   - `"agents": { "cnbd": { "name": "CNB 交付", "worker": "darren-pc", "use": "command",
+     "command": ["node", "C:/Users/darren/.agent-autoloop/plugins/cnb-delivery/run.ts", "rich/test/autoloop_cnb"], "timeout": 35 } }`；
+   - `"rules"` 加 `{ "name": "CNB 交付", "when": { "source": "cnbd", "types": ["pull_request", "pull_request.*", "push"] },
+     "to": "cnbd", "cwd": "C:/Users/darren", "parallel": 2 }`——**cwd 必填**（少了它 reloadRules 报「规则缺少 cwd」整份规则不生效）。
+3. **webhook 密钥**：hub 容器由 compose 的 `env_file: .env` 注入，项目根 `.env` 写
+   `AGENT_AUTOLOOP_SECRET_CNBD=<随机串>` 后 `docker compose up -d` 重建。取值用
+   `docker exec agent-autoloop printenv AGENT_AUTOLOOP_SECRET_CNBD`（容器内值是唯一权威）。
+4. **中继回传地址**：`POST http://<hub>:3350/v1/in/cnbd`，header `x-cnb-token` 同上。
+   验证：无/错 token → 401「验签没过」；对 token → 200，同 body 重放 `duplicate:true`（幂等）。
+5. **worker 侧 API 令牌**：worker 会把自身环境透传给 run.ts，所以 `CNB_TOKEN` 放 Windows 用户环境变量
+   （`setx CNB_TOKEN <PAT>`）后重启计划任务 agent-autoloop。
+6. **审查执行者二选一**（run.ts 按优先级自动选）：环境 `CNB_NPC_EVENT`（+可选 `CNB_NPC_ROLE`）走平台 NPC；
+   否则项目 ops/delivery.json 的 `review.command`；都没有则拒单退标签。push 事件（subject 无编号）自动走发布核实。
+7. **兜底轮询（可选，未接）**：`node run.ts` 之外另有 `pollOnce(cnb, repo)` 库函数，等真实 PAT 校准响应形状后再挂 cron。
+8. **试点仓库**：`rich/test/autoloop_cnb` main 放 `ops/delivery.json`（shape 见 project.ts），
+   `.cnb.yml` 加 relay 流水线（模板 relay.cnb.yml，token 用第 3 步的值），分支保护
+   required_status_checks=check、评审数 ≥1。
+
+已实测打通：POST /v1/in/cnbd → 事件入总线 → 规则路由 → worker 起进程 run.ts → context.json 正常解析 →
+卡在预期位置（缺 CNB_TOKEN）。待 token 到位后填第 5/8 步。
 
 ## 已知约束（来自 CNB 文档与 OpenAPI 实测）
 
