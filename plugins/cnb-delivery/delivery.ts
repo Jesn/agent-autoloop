@@ -212,9 +212,29 @@ export async function commandReceipt(
     const sha = arg.split(/\s+/)[0] ?? "";
     if (!/^[a-f0-9]{7,40}$/.test(sha))
       return await refuse(cnb, number, "回滚指令要带提交号：/autoloop rollback <sha>");
-    await cnb.annotate(sha, { "rollback-requested": `${head.slice(0, 10)} by ${by}` });
-    await cnb.createComment(number, `已登记回滚请求：目标 ${sha.slice(0, 10)}，登记人 ${by}。等仓库的回滚流水线（api_trigger）接上后自动执行。`);
-    return { text: `#${number} 回滚请求已登记（${sha.slice(0, 10)}，by ${by}）`, exit: 0 };
+    // 直接下发回滚流水线（startBuild 的 config 可内联 YAML，仓库不用预配 api_trigger 段）：
+    // 在 main 头上 revert 目标提交并推送，push 管道/中继自然接力出新 shipped 标注
+    const config = [
+      "main:",
+      "  api_trigger:",
+      "    - stages:",
+      `        - name: rollback-${sha.slice(0, 8)}`, 
+      "          script: |",
+      '            git config user.email "autoloop@cnb" && git config user.name "autoloop-rollback"',
+      '            git revert --no-edit "$ROLLBACK_SHA" && git push origin HEAD:main',
+      '            echo "回滚提交已推送"',
+    ].join("\n");
+    const build = await cnb.startBuild({
+      event: "api_trigger",
+      branch: "main",
+      title: `回滚 ${sha.slice(0, 10)}（${by} 指令，#${number}）`,
+      env: { ROLLBACK_SHA: sha },
+      config,
+    });
+    const sn = String(build?.sn ?? "");
+    await cnb.annotate(sha, { "rollback-triggered": `build:${sn} by ${by}` });
+    await cnb.createComment(number, `回滚流水线已触发：revert ${sha.slice(0, 10)} → main，构建 ${sn}。流水线完成后 push 链路会自动打出新 shipped 标注。`);
+    return { text: `#${number} 回滚已触发（revert ${sha.slice(0, 10)}，构建 ${sn}）`, exit: 0 };
   }
   if (cmd === "skip-review") {
     if (!admin && pr.author?.username !== by)

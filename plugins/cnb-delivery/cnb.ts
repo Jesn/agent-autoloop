@@ -106,6 +106,16 @@ export class Cnb {
     return this.api(`/pulls/${number}/reviews`);
   }
 
+  // PR 评论（对话评论，非行内评审）：指令通道的读写都走这里。author 是 CNB 风格 {username,…}
+  comments(number: number): Promise<Array<{ id: string; body: string; author?: { username?: string }; created_at?: string }>> {
+    return this.api(`/pulls/${number}/comments`);
+  }
+
+  async createComment(number: number, body: string): Promise<{ id: number }> {
+    const made = await this.api(`/pulls/${number}/comments`, { body });
+    return { id: Number(made?.id ?? 0) };
+  }
+
   // 分支自己改动的文件清单（带 path/mode/status/patch），免审判定和审查输入都从这里来
   files(number: number): Promise<DiffFile[]> {
     return this.api(`/pulls/${number}/files`);
@@ -158,7 +168,7 @@ export class Cnb {
 
   // ---- 构建（检查与部署流水线）----
 
-  startBuild(form: { event: string; branch?: string; sha?: string; env?: Record<string, string> }): Promise<{ sn: string }> {
+  startBuild(form: { event: string; branch?: string; sha?: string; env?: Record<string, string>; title?: string; config?: string }): Promise<{ sn: string }> {
     return this.api("/build/start", form);
   }
 
