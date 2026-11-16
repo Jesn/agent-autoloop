@@ -5,6 +5,9 @@
 import type { Cnb, Pull } from "./cnb.ts";
 import { liveRelease, type Settings } from "./project.ts";
 import { reviewInput, scopeFromFiles, submitVerdict, type Finding, type Reviewed } from "./review.ts";
+import { startNpcReview, classifyBuild, type NpcRoute } from "./npc.ts";
+
+export type { NpcRoute };
 
 /** 需要人处理才能继续的失败：撤交付标记、退回作者（区别于「等一等就好」的静默等待） */
 export class Refusal extends Error {}
@@ -14,6 +17,8 @@ export type Receipt = { text: string; exit: 0 | 1 | 2 };
 export type DeliveryOptions = {
   /** 审查执行者：拿到审查输入（补丁 + 要点提示词），交回 findings。hub 派自己的 agent 实现 */
   review?: (input: { diff: string; prompt: string }) => Promise<Finding[]>;
+  /** NPC 路线：没有自带执行者时，召唤平台 NPC 审查（异步，下一轮认领结果） */
+  npc?: NpcRoute;
   /** 免审声明：项目设置了 review.agents 时，由受信账号声明这个 PR 是哪个代理写的 */
   declaredAgent?: string | null;
   /** 退回等事件的飞书通知（可选） */
@@ -36,7 +41,7 @@ async function verdict(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOp
   if (!scope.needsReview) return { docsOnly: true };
   const prior = await ownReview(cnb, number, pr.head.sha);
   if (prior)
-    return prior.state === "APPROVED"
+    return prior.state === "approved"
       ? []
       : { waiting: "审查已挡下这版提交，等作者修复后重新交付" };
   if (!options.review) throw new Refusal("没有可用的审查执行者");
@@ -99,6 +104,21 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
   if (!pr.labels.some((label) => label.name === "deliver")) return { text: `#${number} 没有交付标记，没事可做`, exit: 2 };
   const head = pr.head.sha;
   try {
+    // NPC 路线：没有自带审查执行者时，把审查外包给平台 NPC（异步）。免审的 PR 不惊动它。
+    if (!options.review && options.npc) {
+      const files = await cnb.files(number);
+      if (scopeFromFiles(files, config).needsReview && !(await ownReview(cnb, number, head))) {
+        // 去重：同一 head 已召唤过就不再派（api_trigger 构建按 sha 可查），防每轮重复派出
+        const dispatched = await cnb.builds(options.npc.event, head);
+        if (dispatched.length) {
+          const health = classifyBuild(dispatched[0].status);
+          if (health === "error") throw new Refusal(`NPC 审查构建失败（${dispatched[0].sn}），请检查 api_trigger 流水线`);
+          return { text: `#${number} NPC 审查进行中（${dispatched[0].sn}），结果回来后继续`, exit: 2 };
+        }
+        const { sn } = await startNpcReview(cnb, options.npc, number, head, config);
+        return { text: `#${number} 已派出 NPC 审查（${sn || "构建已受理"}）`, exit: 2 };
+      }
+    }
     const reviewed = await verdict(cnb, config, pr, options);
     if ("waiting" in reviewed) return { text: `#${number} ${reviewed.waiting}`, exit: 2 };
     const outcome = await submitVerdict(cnb, number, head, reviewed, MARK(head));

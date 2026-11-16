@@ -163,8 +163,15 @@ export class Cnb {
 
   // ---- 仓库动态（轮询兜底）----
 
-  events(dateHour: string): Promise<any[]> {
-    return this.api(`/../events/${this.repo}/-/${dateHour}`);
+  // 动态接口在 api 根下而非仓库作用域；date 格式 yy-mm-dd-h 或 yy-mm-dd（两位年！）
+  async events(date: string): Promise<any[]> {
+    const response = await fetch(`${this.apiBase}/events/${this.repo}/-/${date}`, {
+      headers: { accept: "application/json", authorization: `Bearer ${this.token}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(`${response.status} ${JSON.stringify(data).slice(0, 200)}`);
+    return data;
   }
 }
 
