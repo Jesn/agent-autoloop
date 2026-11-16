@@ -122,7 +122,7 @@ export class Cnb {
   // 按事件名和提交查构建历史：发布核实靠它找到合并提交的部署构建，不依赖中继回传 sn
   async builds(event: string, sha: string): Promise<Array<{ sn: string; status: string }>> {
     const page = await this.api(`/../build/logs?event=${encodeURIComponent(event)}&sha=${sha}&page_size=10`);
-    const items = Array.isArray(page) ? page : page?.items ?? [];
+    const items = Array.isArray(page) ? page : page?.data ?? page?.items ?? []; // 实测包装是 { total, totalCapped, data }
     return items.map((item: any) => ({ sn: String(item.sn ?? item.serial_number ?? ""), status: String(item.status ?? "") }));
   }
 
@@ -169,9 +169,10 @@ export class Cnb {
       headers: { accept: "application/json", authorization: `Bearer ${this.token}` },
       signal: AbortSignal.timeout(30_000),
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(`${response.status} ${JSON.stringify(data).slice(0, 200)}`);
-    return data;
+    const text = await response.text();
+    if (!response.ok) throw new Error(`${response.status} ${text.slice(0, 200)}`);
+    // 实测响应是 NDJSON：一行一个事件对象（Gitea 风格：PushEvent/CreateEvent/…）
+    return text.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
   }
 }
 

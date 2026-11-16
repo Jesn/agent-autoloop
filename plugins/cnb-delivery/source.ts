@@ -41,8 +41,12 @@ export default function cnbDelivery({ headers, body, secret }: Input) {
     throw new Error(`不支持的事件：${relay.event}`);
   }
   const number = relay.number ? `#${relay.number}` : "";
-  // 同一事件重放（中继重试）要幂等：优先用中继时间戳区分轮次，没有就退回 body 摘要
-  const id = `${relay.repo}${number}@${relay.event}@${relay.at ?? createHash("sha256").update(body).digest("hex").slice(0, 16)}`;
+  // 同一事件重放（中继重试）与兑底轮询补漏要幂等：用提交号做键（中继与轮询各自的时间戳不同，
+  // 按 at 键会漏去重）。同一 head 重复上报只算一次；head 变了是新事件。
+  const key = /^[a-f0-9]{7,40}$/.test(String(relay.sha))
+    ? relay.sha!.slice(0, 10)
+    : createHash("sha256").update(body).digest("hex").slice(0, 16);
+  const id = `${relay.repo}${number}@${relay.event}@${key}`;
   return [
     {
       id,
