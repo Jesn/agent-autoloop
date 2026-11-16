@@ -39,6 +39,19 @@ main:
               -H "x-cnb-token: $HUB_TOKEN" -H "content-type: application/json" \
               -d "{\"event\":\"pull_request.update\",\"repo\":\"$CNB_REPO_SLUG\",\"number\":\"$NUM\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"$CNB_BRANCH\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 
+  # PR 评论（含 /autoloop 指令）：hub 侧识别 /autoloop 开头的评论当指令（retry/skip-review/rollback），
+  # 其余评论忽略。评论者/内容的环境变量名以 CNB 文档为准，先用环境倾倒法实测
+  pull_request.comment:
+    - stages:
+        - name: relay-to-hub
+          env:
+            HUB_URL: https://hub.example.com/v1/in/cnbd
+            HUB_TOKEN: $AGENT_AUTOLOOP_SECRET_CNBD
+          script: |
+            curl -fsS -X POST "$HUB_URL" \
+              -H "x-cnb-token: $HUB_TOKEN" -H "content-type: application/json" \
+              -d "{\"event\":\"pull_request.comment\",\"repo\":\"$CNB_REPO_SLUG\",\"number\":\"${CNB_EVENT_URL##*/}\",\"comment\":$(echo "$CNB_PULL_REQUEST_COMMENT_BODY" | jq -Rs .),\"commenter\":\"$CNB_PULL_REQUEST_COMMENT_AUTHOR\",\"sha\":\"$CNB_COMMIT\",\"url\":\"$CNB_EVENT_URL\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+
   # 合并进 main：通知 hub 进入「等发布、核实线上」阶段
   push:
     - branch-filter: [main]

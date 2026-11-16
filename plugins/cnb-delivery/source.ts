@@ -25,6 +25,7 @@ type Relay = {
   url?: string; // 事件页地址（CNB_EVENT_URL）
   proposer?: string; // PR 发起人
   comment?: string; // @NPC/交付 的评论内容（comment 事件才有）
+  commenter?: string; // 评论者账号（comment 事件才有）
   at?: string; // 中继时刻 ISO 时间，缺失则用 body 摘要做幂等
 };
 
@@ -46,14 +47,19 @@ export default function cnbDelivery({ headers, body, secret }: Input) {
   const key = /^[a-f0-9]{7,40}$/.test(String(relay.sha))
     ? relay.sha!.slice(0, 10)
     : createHash("sha256").update(body).digest("hex").slice(0, 16);
-  const id = `${relay.repo}${number}@${relay.event}@${key}`;
+  // 评论指令（/autoloop 开头）走独立 subject repo#N@cmd@…：不挂状态机事件的退避 run，
+  // 指令即刻新起一轮；id 键用评论体哈希，同一条指令重放去重、不同指令各算各
+  const isCommand = relay.event === "pull_request.comment" && /^\s*\/autoloop\s+/m.test(String(relay.comment ?? ""));
+  const id = isCommand
+    ? `${relay.repo}${number}@cmd@${createHash("sha256").update(String(relay.comment)).digest("hex").slice(0, 12)}`
+    : `${relay.repo}${number}@${relay.event}@${key}`;
   return [
     {
       id,
       type: relay.event,
-      subject: clean(`${relay.repo}${number}`),
+      subject: clean(isCommand ? `${relay.repo}${number}@cmd` : `${relay.repo}${number}`),
       summary: fit(String(relay.title ?? relay.comment ?? relay.sha ?? relay.event).slice(0, 200), 200),
-      detail: fit([relay.comment, relay.proposer && `发起人：${relay.proposer}`, relay.sha && `提交：${relay.sha}`].filter(Boolean).join("\n"), 4000),
+      detail: fit([relay.comment, relay.commenter && `评论人：${relay.commenter}`, relay.proposer && `发起人：${relay.proposer}`, relay.sha && `提交：${relay.sha}`].filter(Boolean).join("\n"), 4000),
       link: encodeURI(String(relay.url ?? `https://cnb.cool/${relay.repo}`)).slice(0, 500),
     },
   ];
