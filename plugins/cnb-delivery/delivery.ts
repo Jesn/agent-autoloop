@@ -56,7 +56,8 @@ async function gate(cnb: Cnb, config: Settings, pr: Pull): Promise<Receipt> {
   if (pr.blocked_on === "code_conflict" || pr.mergeable_state === "conflict")
     throw new Refusal("与 main 有冲突：CNB 没有代为更新分支的接口，请作者自己解决后重新交付");
   if (pr.is_wip) return { text: `#${number} 还是 WIP，等作者转正`, exit: 2 };
-  if (pr.blocked_on) {
+  // blocked_on="unblocked" 表示无阻塞，真正的阻塞值见 cnb.ts Pull 类型注释
+  if (pr.blocked_on && pr.blocked_on !== "unblocked") {
     const admin = config.admin_merge.includes(String(pr.author?.username ?? ""));
     if (!admin) return { text: `#${number} 平台门禁未过（${pr.blocked_on}），等着`, exit: 2 };
   }
