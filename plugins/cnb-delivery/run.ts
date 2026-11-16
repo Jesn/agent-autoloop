@@ -69,7 +69,7 @@ export async function runWith(cnb: Cnb, repo: string): Promise<{ text: string; e
   // 评论指令：subject 形如 repo#N@cmd@…（独立于状态机事件，不挂退避 run）；
   // 中继把指令正文放 detail，指令人放 summary/detail（评论人：xxx）
   const esc = repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const cmdNumber = (subject: string) => Number(new RegExp(`^${esc}#(\\d+)@cmd@`).exec(subject)?.[1] ?? 0);
+  const cmdNumber = (subject: string) => Number(new RegExp(`^${esc}#(\\d+)@cmd($|@)`).exec(subject)?.[1] ?? 0);
   const cmdEvent = (context.events ?? []).find((event: any) => {
     const text = `${event.summary ?? ""}\n${event.detail ?? ""}`;
     return cmdNumber(String(event.subject ?? "")) > 0 && parseCommand(text) !== null;
