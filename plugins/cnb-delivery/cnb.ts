@@ -137,11 +137,14 @@ export class Cnb {
     // 实测 sha 过滤参数不生效，拉回后由调用方按 b.sha 自行匹配
     const page = await this.api(`/build/logs?event=${encodeURIComponent(event)}&page_size=20`);
     const items = Array.isArray(page) ? page : page?.data ?? page?.items ?? []; // 实测包装是 { total, totalCapped, data }
-    return items.map((item: any) => ({
-      sn: String(item.sn ?? item.serial_number ?? ""),
-      status: String(item.status ?? ""),
-      sha: item.sha ? String(item.sha) : undefined,
-    }));
+    return items
+      .map((item: any) => ({
+        sn: String(item.sn ?? item.serial_number ?? ""),
+        status: String(item.status ?? ""),
+        sha: item.sha ? String(item.sha) : undefined,
+      }))
+      // 实测：返回的 sha 是完整 40 位（有的版本 12 位短前缀），按前缀匹配筛出本次提交的构建
+      .filter((b) => !sha || !b.sha || String(b.sha).startsWith(sha.slice(0, 12)));
   }
 
   // ---- 合并与分支 ----
