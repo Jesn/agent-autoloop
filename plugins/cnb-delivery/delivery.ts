@@ -147,7 +147,7 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
           if (health === "error") throw new Refusal(`NPC 审查构建失败（${dispatched[0].sn}），请检查 api_trigger 流水线`);
           return { text: `#${number} NPC 审查进行中（${dispatched[0].sn}），结果回来后继续`, exit: 2 };
         }
-        const { sn } = await startNpcReview(cnb, options.npc, number, head, config);
+        const { sn } = await startNpcReview(cnb, options.npc, number, head, config, String(pr.head?.ref ?? ""));
         return { text: `#${number} 已派出 NPC 审查（${sn || "构建已受理"}）`, exit: 2 };
       }
     }

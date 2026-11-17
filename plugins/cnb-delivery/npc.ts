@@ -41,8 +41,9 @@ export function npcReviewPrompt(number: number, head: string, settings: Settings
   ].join("\n");
 }
 
-/** 召唤 NPC 审查：触发项目里的 api_trigger 流水线。返回构建序列号供追踪。 */
-export async function startNpcReview(cnb: Cnb, route: NpcRoute, number: number, head: string, settings: Settings): Promise<{ sn: string }> {
+/** 召唤 NPC 审查：触发项目里的 api_trigger 流水线。branch 必须传 PR 源分支——流水线 fetch 的是 branch，
+ *  checkout 的是 sha；不带 branch 会拿 main 去找 PR head，报 reference is not a tree。 */
+export async function startNpcReview(cnb: Cnb, route: NpcRoute, number: number, head: string, settings: Settings, branch?: string): Promise<{ sn: string }> {
   if (!/^api_trigger_/.test(route.event)) throw new Error(`NPC 触发事件必须以 api_trigger_ 开头：${route.event}`);
   const env: Record<string, string> = {
     DELIVERY_PR: String(number),
@@ -53,6 +54,7 @@ export async function startNpcReview(cnb: Cnb, route: NpcRoute, number: number, 
   };
   const started = await cnb.startBuild({
     event: route.event,
+    branch,
     sha: head,
     env,
     // 按平台 NPC 语义执行：操作者展示为 NPC 身份，token 资源按 NPC 规则收窄；
