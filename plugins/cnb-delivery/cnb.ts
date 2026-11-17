@@ -118,7 +118,10 @@ export class Cnb {
 
   // 分支自己改动的文件清单（带 path/mode/status/patch），免审判定和审查输入都从这里来
   files(number: number): Promise<DiffFile[]> {
-    return this.api(`/pulls/${number}/files`);
+    // CNB 的 diff 项字段是 filename/status（不是 Gitea 的 path）；不归一会让 scopeFromFiles 拿到空列表、一切 PR 误判免审
+    return this.api(`/pulls/${number}/files`).then((list: any[]) =>
+      (list ?? []).map((f: any) => ({ ...f, path: f.path ?? f.filename })),
+    );
   }
 
   // 读 main 上的审查要点等仓库内文件；响应里的 content 是 base64（GitHub 风格），
