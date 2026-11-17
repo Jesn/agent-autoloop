@@ -78,6 +78,13 @@ CNB 流水线(.cnb.yml 中继)──webhook──▶ hub(/v1/in/cnbd)──rules
   - **平台系统 NPC 的 approve 不受自批禁令**（插件 token 才是 Owner NPC）→ 状态机认领 marker 后正常放行；
   - marker 防串版生效：PR head 一变旧 marker 作废、自动重派；
   - npc:go 的 `userPrompt` 必填（缺了构建直接失败），用 env `DELIVERY_USER_PROMPT` 注入。
+- **NPC 自动修复（workMode）实测要点**（PR #11 全链路验证）：
+  - 修复事件 = 审查事件尾部 `review`→`fix`（`api_trigger_deliver_fix`）；不配这段则 request_changes 照旧退回人工；
+  - `pr.head.ref` 可能带 `refs/heads/` 前缀（各端点口径不一），startBuild 会自己再加一层——必须先规范化（plainBranch），否则 fetch `refs/heads/refs/heads/x` not found；
+  - workMode 的语义：NPC token 默认只读，开启后可写码/推分支/按评审意见修改（PR #11 中 CodeBuddy 自主改 app.txt、push 源分支、评论修复说明，全部自动）；
+  - 打回后的重开链路：verdict 把压头的 request_changes 返回为 `blockedByReview`（携评审 body 当问题清单）→ fixRounds 未超就派修 → NPC push 新 head → marker 变更自动重派审查 → approve → 认领合并；
+  - 轮数上限 `review.fixRounds` 按修复事件全量计数（粗粒度防死循环），超限打 `npc-fix-exhausted` 标注退回人工；
+  - 审查标准要写进 `ops/review.md` 才可靠——第一轮 retry_limit=-1 被放行（NPC 按「结果错误」标准判不了配置风险），写明负数为阻塞后立刻 request_changes。
 
 ## CNB API 端点备忘
 

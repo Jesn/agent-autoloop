@@ -71,6 +71,24 @@ main:
   #       - name: deploy
   #         script: ./deploy.sh
 
+# NPC 自动修复流水线：审查事件名尾部 review 换 fix 即是修复事件（api_trigger_deliver_review →
+# api_trigger_deliver_fix），项目不配这段则 request_changes 照旧退回人工。中台以 npc.workMode=true
+# 派单（token 提权可写可推），env 的 DELIVERY_USER_PROMPT 带问题清单与推送要求；
+# NPC 修完 push 回源分支，新 head 触发重审，轮数由 ops/delivery.json 的 review.fixRounds 封顶。
+$:
+  api_trigger_deliver_fix:
+    - docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: NPC 自动修复
+          type: npc:go
+          options:
+            systemPrompt: >-
+              你是该仓库的开发工程师。严格按用户提示词执行：直接修改代码修复列出的问题，
+              改动保持最小、聚焦，不动无关文件；完成后把改动推回指定的源分支，
+              并按要求在原 PR 下评论修复说明。某条问题经核实不成立的，说明理由后跳过。
+            userPrompt: ${DELIVERY_USER_PROMPT}
+
 # NPC 审查流水线：挂 $ 通配 key（分支 key 只匹配同名分支；startBuild 的 branch 传 PR 源分支）。
 # 中台以 api_trigger_deliver_review + npc.name=CodeBuddy 派单，env 带 DELIVERY_USER_PROMPT；npc:go 的 userPrompt 必填。
 # 需 worker 环境变量 CNB_NPC_EVENT=api_trigger_deliver_review 激活派单路线。
