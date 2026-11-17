@@ -41,10 +41,17 @@ export function npcReviewPrompt(number: number, head: string, settings: Settings
   ].join("\n");
 }
 
+/** CNB 各端点对分支名的口径不一（有的给 refs/heads/x，有的给 x），startBuild 的 branch 会再自己加一次
+ *  refs/heads/ 前缀——不规范化会变成 refs/heads/refs/heads/x，fetch 直接 not found。 */
+export function plainBranch(branch: string | undefined): string {
+  return String(branch ?? "").replace(/^refs\/heads\//, "");
+}
+
 /** 召唤 NPC 审查：触发项目里的 api_trigger 流水线。branch 必须传 PR 源分支——流水线 fetch 的是 branch，
  *  checkout 的是 sha；不带 branch 会拿 main 去找 PR head，报 reference is not a tree。 */
 export async function startNpcReview(cnb: Cnb, route: NpcRoute, number: number, head: string, settings: Settings, branch?: string): Promise<{ sn: string }> {
   if (!/^api_trigger_/.test(route.event)) throw new Error(`NPC 触发事件必须以 api_trigger_ 开头：${route.event}`);
+  branch = plainBranch(branch);
   const env: Record<string, string> = {
     DELIVERY_PR: String(number),
     DELIVERY_HEAD: head,
@@ -102,10 +109,11 @@ export async function startNpcFix(
   fixEvent: string,
   number: number,
   head: string,
-  branch: string,
+  branchRaw: string,
   findings: Array<{ title: string; text: string }>,
 ): Promise<{ sn: string }> {
   if (!/^api_trigger_/.test(fixEvent)) throw new Error(`NPC 修复触发事件必须以 api_trigger_ 开头：${fixEvent}`);
+  const branch = plainBranch(branchRaw);
   const started = await cnb.startBuild({
     event: fixEvent,
     branch,
