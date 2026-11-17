@@ -51,7 +51,14 @@ export async function startNpcReview(cnb: Cnb, route: NpcRoute, number: number, 
     DELIVERY_USER_PROMPT: npcReviewPrompt(number, head, settings),
     ...(route.model ? { DELIVERY_MODEL: route.model } : {}),
   };
-  const started = await cnb.startBuild({ event: route.event, sha: head, env, ...(route.role ? { role: route.role } : {}) });
+  const started = await cnb.startBuild({
+    event: route.event,
+    sha: head,
+    env,
+    // 按平台 NPC 语义执行：操作者展示为 NPC 身份，token 资源按 NPC 规则收窄；
+    // 角色设定不在 API 传（StartBuildReq 无 role 字段），由 .cnb.yml 流水线 options.role/systemPrompt 承担
+    npc: { name: "CodeBuddy" },
+  });
   return { sn: String(started?.sn ?? "") };
 }
 

@@ -168,7 +168,7 @@ export class Cnb {
 
   // ---- 构建（检查与部署流水线）----
 
-  startBuild(form: { event: string; branch?: string; sha?: string; env?: Record<string, string>; title?: string; config?: string }): Promise<{ sn: string }> {
+  startBuild(form: { event: string; branch?: string; sha?: string; env?: Record<string, string>; title?: string; config?: string; npc?: { name: "CodeBuddy"; workMode?: boolean } }): Promise<{ sn: string }> {
     return this.api("/build/start", form);
   }
 
