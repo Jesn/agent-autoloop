@@ -180,6 +180,14 @@ export class Cnb {
     return this.api(`/build/status/${encodeURIComponent(sn)}`);
   }
 
+  /** 单个提交详情（squash 台账用：提交标题里的 (#N) 反查 PR，才能拿到 NPC push 的 head sha）。 */
+  commit(sha: string): Promise<{ parents: string[]; message?: string }> {
+    return this.api(`/git/commits/${encodeURIComponent(sha)}`).then((c: any) => ({
+      parents: (Array.isArray(c?.parents) ? c.parents : []).map((p: any) => String(p?.sha ?? p ?? "")),
+      message: typeof c?.commit?.message === "string" ? c.commit.message : undefined,
+    }));
+  }
+
   /** 平台 NPC 行动台账：工作模式 NPC 的 push 记录（实测 actions 端点不记 API 派单，commits 才有货）。 */
   npcCommits(pageSize = 20): Promise<Array<{ sn: string; ref?: string; sha?: string; npc_name?: string; commits_count?: number }>> {
     return this.api(`/npc-observability/commits?page_size=${pageSize}`).then((page: any) =>

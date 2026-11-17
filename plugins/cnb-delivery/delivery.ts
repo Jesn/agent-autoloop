@@ -101,11 +101,20 @@ async function ship(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOptio
   return shipSha(cnb, config, pr.head.sha, options, Number(pr.number));
 }
 
-/** NPC 参与台账：交付链里有工作模式 NPC push 时（commits 端点有它的记录，行里的 sha 就是交付 head），
- *  把参与情况并进 shipped 标注。台账是锦上添花：端点不可用或没参与都不影响发布。 */
+/** NPC 参与台账：交付链里有工作模式 NPC push 时，把参与情况并进 shipped 标注。台账是锦上添花：
+ *  端点不可用或没参与都不影响发布。匹配两次：先按交付 sha（fast-forward/直推），
+ *  再按它的 parent（squash 合并后交付 sha 是新建的合并提交，NPC push 的 sha 落在 parent 上）。 */
 async function npcLedger(cnb: Cnb, sha: string): Promise<Record<string, string>> {
   try {
-    const hit = (await cnb.npcCommits(20)).find((row) => typeof row.sha === "string" && sha.startsWith(row.sha.slice(0, 10)));
+    const rows = await cnb.npcCommits(20);
+    const match = (target: string) =>
+      rows.find((row) => typeof row.sha === "string" && target.startsWith(row.sha.slice(0, 10)));
+    // squash 合并后 NPC push 的 sha 是 PR head、不在 main 历史里——从交付提交标题的 (#N) 反查 PR 拿 head 再匹配
+    const number = Number(
+      (await cnb.commit(sha).catch(() => null))?.message?.match(/\(#(\d+)\)\s*$/)?.[1] ?? 0,
+    );
+    const head = number ? await cnb.pull(number).then((p) => String(p.head?.sha ?? "")).catch(() => "") : "";
+    const hit = match(sha) ?? (head ? match(head) : undefined);
     if (!hit) return {};
     const who = hit.npc_name ?? "npc";
     const fix = typeof hit.commits_count === "number" ? ` commits:${hit.commits_count}` : "";
