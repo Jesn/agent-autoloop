@@ -31,7 +31,7 @@ const MARK = (head: string) => `交付审查（${head.slice(0, 10)}）`;
 async function ownReview(cnb: Cnb, number: number, head: string) {
   const reviews = await cnb.reviews(number);
   const mine = reviews.filter((review: any) => typeof review.body === "string" && review.body.startsWith(MARK(head)));
-  return mine.at(-1) as { state: string } | undefined;
+  return mine.at(-1) as { state: string; body?: string } | undefined;
 }
 
 async function verdict(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOptions): Promise<Reviewed> {
@@ -45,7 +45,7 @@ async function verdict(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOp
   if (prior)
     return prior.state === "approved"
       ? []
-      : { waiting: "审查已挡下这版提交，等作者修复后重新交付" };
+      : { blockedByReview: String(prior.body ?? "") };
   if (!options.review) throw new Refusal("没有可用的审查执行者");
   const points = await cnb.file("main", config.review.points);
   const input = reviewInput(files, points, pr.body || undefined);
@@ -153,6 +153,24 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
     }
     const reviewed = await verdict(cnb, config, pr, options);
     if ("waiting" in reviewed) return { text: `#${number} ${reviewed.waiting}`, exit: 2 };
+    if ("blockedByReview" in reviewed) {
+      // 上一轮评审已打回这版提交：没配 NPC 修复就等作者推新提交；配了就把评审意见派给工作模式的
+      // CodeBuddy 修——修完 push 新 head，marker 变更自动重开审查，直到 approve 或轮数用尽。
+      const fixEvent = options.npc ? fixEventOf(options.npc) : null;
+      const rounds = config.review.fixRounds ?? 0;
+      if (fixEvent && rounds > 0) {
+        const done = (await cnb.builds(fixEvent, "")).length; // 按事件计数修复轮数（含其它 PR，粗粒度但足够防死循环）
+        if (done < rounds) {
+          const findings = [{ title: `上轮审查意见（PR #${number}）`, text: reviewed.blockedByReview }];
+          const { sn } = await startNpcFix(cnb, fixEvent, number, head, String(pr.head?.ref ?? ""), findings);
+          await cnb.annotate(head, { "npc-fix-dispatched": `build:${sn} round:${done + 1}` });
+          options.notify?.(`#${number} 审查已打回，已派 NPC 修复（第 ${done + 1} 轮，${sn}）`);
+          return { text: `#${number} 审查已打回，已派 NPC 修复（第 ${done + 1} 轮，${sn || "构建已受理"}）`, exit: 2 };
+        }
+        await cnb.annotate(head, { "npc-fix-exhausted": `rounds:${done}` }).catch(() => {});
+      }
+      return { text: `#${number} 审查已挡下这版提交，等作者修复后重新交付`, exit: 2 };
+    }
     const outcome = await submitVerdict(cnb, number, head, reviewed, MARK(head));
     if ("changed" in outcome) return { text: `#${number} 审查期间提交变了，下一轮重开`, exit: 2 };
     if (Array.isArray(reviewed) && reviewed.length) {

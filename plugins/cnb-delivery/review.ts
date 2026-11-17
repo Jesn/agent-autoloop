@@ -7,9 +7,17 @@ import { matches, PLAIN_FILE_MODES, type Settings } from "./project.ts";
 export type { DiffFile };
 
 export type Finding = { title: string; text: string };
-/** 审查发现的问题，或项目设置放行/暂等时说明缘由。形状与 GitHub 版一致，waiting 是 CNB 特有：
- * 自己上一轮的 request_changes 还压在这个 head 上，等作者修复即可，不撤标签不退回。 */
-export type Reviewed = Finding[] | { exempt: string } | { blocked: string } | { changed: true } | { docsOnly: true } | { waiting: string };
+/** 审查发现的问题，或项目设置放行/暂等时说明缘由。形状与 GitHub 版一致。CNB 特有两种：
+ *  waiting 是暂等；blockedByReview 是上一轮评审（自带 body 全文）已打回这版提交——
+ *  有 NPC 修复路线时可拿 body 当问题清单派工作模式修复。 */
+export type Reviewed =
+  | Finding[]
+  | { exempt: string }
+  | { blocked: string }
+  | { blockedByReview: string }
+  | { changed: true }
+  | { docsOnly: true }
+  | { waiting: string };
 
 /** CNB files 接口的一个文件 */
 
