@@ -85,6 +85,10 @@ CNB 流水线(.cnb.yml 中继)──webhook──▶ hub(/v1/in/cnbd)──rules
   - 打回后的重开链路：verdict 把压头的 request_changes 返回为 `blockedByReview`（携评审 body 当问题清单）→ fixRounds 未超就派修 → NPC push 新 head → marker 变更自动重派审查 → approve → 认领合并；
   - 轮数上限 `review.fixRounds` 按修复事件全量计数（粗粒度防死循环），超限打 `npc-fix-exhausted` 标注退回人工；
   - 审查标准要写进 `ops/review.md` 才可靠——第一轮 retry_limit=-1 被放行（NPC 按「结果错误」标准判不了配置风险），写明负数为阻塞后立刻 request_changes。
+- **NPC 台账（npc-observability）实测要点**（第 3 步）：
+  - `actions` 端点对 API 派单不记录（total=0）；`commits` 才有货——工作模式 NPC 的 push 记录（行里带构建 sn、sha 就是推上的新 head）；
+  - squash 合并后交付 sha 是新建的合并提交，NPC push 的 sha 是 PR head、**不在 main 历史里**，parent 上也没有——从交付提交标题的 `(#N)` 反查 PR 拿 head 再匹配（merge 固定 `{title} (#N)` 正好可用）；
+  - shipSha 发布成功时查台账，命中则把 `npc-commit=<npc>@<sha> build:<sn> commits:<n>` 并进 shipped 标注；端点不可用或没参与都不影响发布。
 
 ## CNB API 端点备忘
 
