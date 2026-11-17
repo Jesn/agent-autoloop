@@ -5,7 +5,7 @@
 import type { Cnb, Pull } from "./cnb.ts";
 import { liveRelease, type Settings } from "./project.ts";
 import { reviewInput, scopeFromFiles, submitVerdict, type Finding, type Reviewed } from "./review.ts";
-import { startNpcReview, startNpcFix, fixEventOf, classifyBuild, type NpcRoute } from "./npc.ts";
+import { startNpcReview, startNpcFix, startNpcDev, fixEventOf, classifyBuild, type NpcRoute } from "./npc.ts";
 
 export type { NpcRoute };
 
@@ -156,7 +156,21 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
   }
   if (pr.state === "merged") return ship(cnb, config, pr, options);
   if (pr.state === "closed") return { text: `#${number} 已关闭，没事可做`, exit: 2 };
-  if (!pr.labels.some((label) => label.name === "deliver")) return { text: `#${number} 没有交付标记，没事可做`, exit: 2 };
+  // NPC 开的 PR 自动补交付标：作者认出是平台 NPC（CodeBuddy）就视为交付，无需人工打标——
+  // 标签 API 有假成功，POST 后回读确认；补上了顺势继续走状态机，没补上（权限/端点问题）就照旧等人工
+  if (!pr.labels.some((label) => label.name === "deliver")) {
+    if (pr.author?.username === "CodeBuddy") {
+      await cnb.addLabels(number, ["deliver"]);
+      const fresh = await cnb.pull(number).catch(() => null);
+      if (fresh?.labels.some((label) => label.name === "deliver")) {
+        options.notify?.(`#${number} NPC 开发的 PR，已自动补交付标`);
+      } else {
+        return { text: `#${number} NPC 开发的 PR 自动补标没落库，需人工补打 deliver`, exit: 1 };
+      }
+    } else {
+      return { text: `#${number} 没有交付标记，没事可做`, exit: 2 };
+    }
+  }
   const head = pr.head.sha;
   try {
     // NPC 路线：没有自带审查执行者时，把审查外包给平台 NPC（异步）。免审的 PR 不惊动它。
@@ -234,14 +248,14 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
 // PR 里评论 /autoloop <cmd>，经中继进 hub 后路由到独立 subject（repo#N@cmd@…）——
 // 不挂到状态机的退避 run 上，指令即刻新起一轮。
 
-export type Command = { cmd: "retry" | "skip-review" | "rollback"; arg: string; by: string };
+export type Command = { cmd: "retry" | "skip-review" | "rollback" | "build"; arg: string; by: string };
 
 /** 从中继事件的 detail/summary 里解出指令；不是指令返回 null */
 export function parseCommand(text: string): { cmd: Command["cmd"]; arg: string } | null {
   const hit = /^\s*\/autoloop\s+(\S+)(?:\s+([\s\S]+))?$/m.exec(text);
   if (!hit) return null;
   const cmd = hit[1].toLowerCase();
-  if (cmd !== "retry" && cmd !== "skip-review" && cmd !== "rollback") return null;
+  if (cmd !== "retry" && cmd !== "skip-review" && cmd !== "rollback" && cmd !== "build") return null;
   return { cmd, arg: (hit[2] ?? "").trim() };
 }
 
@@ -295,6 +309,19 @@ export async function commandReceipt(
       return await refuse(cnb, number, `免审声明只有 PR 作者或管理员能发，${by || "未知账号"} 不行`);
     await cnb.createComment(number, `${SKIP_MARK(head)}${arg || "作者显式免审"}\n声明人：${by}`);
     // 声明落库后直接跑一轮状态机：verdict 会认到声明走 exempt
+  }
+  if (cmd === "build") {
+    // 需求派单：召唤工作模式的 CodeBuddy 从零实现并自己开 PR。权限与 rollback 同级（管理员名单）；
+    // 需求文本取指令后面全部内容，为空则拒。NPC 开出的 PR 由 opened 中继接管，作者认出即自动补标。
+    if (!admin) return await refuse(cnb, number, `开发派单只有管理员（${admins.join(", ")}）能发起，${by || "未知账号"} 不在名单里`);
+    const requirement = arg.trim();
+    if (!requirement) return await refuse(cnb, number, "开发派单要带需求描述：/autoloop build <需求>");
+    const { sn } = await startNpcDev(cnb, "api_trigger_deliver_build", requirement, by);
+    await cnb.createComment(
+      number,
+      `开发派单已受理（构建 ${sn}）：CodeBuddy 将按需求实现并自行开 PR，\n开出后自动进入「审查 → 修复 → 合并 → 发布」链路。\n\n> ${requirement.replaceAll("\n", "\n> ")}`,
+    );
+    return { text: `#${number} 开发派单已发出（${sn}）`, exit: 0 };
   }
   // retry：什么都不用做，重新走状态机就是重试；skip-review 已写声明，同样接着走
   const receipt = await deliverOnce(cnb, config, number, options);

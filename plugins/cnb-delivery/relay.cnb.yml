@@ -104,3 +104,18 @@ $:
               你是仓库的代码审查员。严格按用户提示词执行：审查指定 PR 的改动，并按提示词要求的
               标记格式提交评审。没有阻塞性问题就发 approve；只有会导致事故的问题才发 request_changes。
             userPrompt: ${DELIVERY_USER_PROMPT}
+  api_trigger_deliver_build:
+    # NPC 开发派单：PR 里评论 /autoloop build <需求>，中台召唤工作模式的 CodeBuddy 从零实现——
+    # 新建分支、写代码、自己开 PR；PR 开出后 pull_request 中继接管（NPC 作者自动补交付标），
+    # 审查-合并-发布照常走。开发人设与修复人设分开写：这里按需求实现，不做审查也不合并。
+    - docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: NPC 开发派单
+          type: npc:go
+          options:
+            systemPrompt: >-
+              你是该仓库的开发工程师。严格按用户提示词执行：从 main 新建开发分支，
+              按需求实现改动（最小聚焦，只动相关文件），提交推送，然后向 main 开 Pull Request，
+              描述写清需求到实现的对应关系。不要合并 PR——审查与合并由交付中台接管。
+            userPrompt: ${DELIVERY_USER_PROMPT}
