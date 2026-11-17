@@ -180,6 +180,19 @@ export class Cnb {
     return this.api(`/build/status/${encodeURIComponent(sn)}`);
   }
 
+  /** 平台 NPC 行动台账：工作模式 NPC 的 push 记录（实测 actions 端点不记 API 派单，commits 才有货）。 */
+  npcCommits(pageSize = 20): Promise<Array<{ sn: string; ref?: string; sha?: string; npc_name?: string; commits_count?: number }>> {
+    return this.api(`/npc-observability/commits?page_size=${pageSize}`).then((page: any) =>
+      (Array.isArray(page) ? page : page?.items ?? []).map((item: any) => ({
+        sn: String(item.sn ?? ""),
+        ref: item.ref ? String(item.ref) : undefined,
+        sha: item.sha ? String(item.sha) : undefined,
+        npc_name: item.npc_name ? String(item.npc_name) : undefined,
+        commits_count: typeof item.commits_count === "number" ? item.commits_count : undefined,
+      })),
+    );
+  }
+
   // ---- 仓库动态（轮询兜底）----
 
   // 动态接口在 api 根下而非仓库作用域；date 格式 yy-mm-dd-h 或 yy-mm-dd（两位年！）

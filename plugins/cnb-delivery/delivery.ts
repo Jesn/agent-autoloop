@@ -101,6 +101,20 @@ async function ship(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOptio
   return shipSha(cnb, config, pr.head.sha, options, Number(pr.number));
 }
 
+/** NPC 参与台账：交付链里有工作模式 NPC push 时（commits 端点有它的记录，行里的 sha 就是交付 head），
+ *  把参与情况并进 shipped 标注。台账是锦上添花：端点不可用或没参与都不影响发布。 */
+async function npcLedger(cnb: Cnb, sha: string): Promise<Record<string, string>> {
+  try {
+    const hit = (await cnb.npcCommits(20)).find((row) => typeof row.sha === "string" && sha.startsWith(row.sha.slice(0, 10)));
+    if (!hit) return {};
+    const who = hit.npc_name ?? "npc";
+    const fix = typeof hit.commits_count === "number" ? ` commits:${hit.commits_count}` : "";
+    return { "npc-commit": `${who}@${String(hit.sha).slice(0, 10)} build:${String(hit.sn).slice(-10)}${fix}` };
+  } catch {
+    return {};
+  }
+}
+
 export async function shipSha(cnb: Cnb, config: Settings, sha: string, options: DeliveryOptions, number = 0): Promise<Receipt> {
   const where = number ? `#${number} ` : `${sha.slice(0, 10)} `;
   const builds = await cnb.builds(config.ship.pipeline, sha);
@@ -113,13 +127,13 @@ export async function shipSha(cnb: Cnb, config: Settings, sha: string, options: 
     return { text, exit: 1 };
   }
   if (!config.health) {
-    await cnb.annotate(sha, { shipped: sha.slice(0, 10) });
+    await cnb.annotate(sha, { shipped: sha.slice(0, 10), ...(await npcLedger(cnb, sha)) });
     return { text: `${where}已发布（构建 ${latest.sn} 成功，项目没配健康核实）`, exit: 0 };
   }
   const live = await liveRelease(config);
   if (!live || (live.sha !== sha && !sha.startsWith(live.sha) && !live.sha.startsWith(sha.slice(0, 10))))
     return { text: `${where}线上版本还没到 ${sha.slice(0, 10)}，等发布生效`, exit: 2 };
-  await cnb.annotate(sha, { shipped: live.release.slice(0, 200) });
+  await cnb.annotate(sha, { shipped: live.release.slice(0, 200), ...(await npcLedger(cnb, sha)) });
   return { text: `${where}已发布并核实（${live.release}）`, exit: 0 };
 }
 
