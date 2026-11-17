@@ -89,6 +89,12 @@ CNB 流水线(.cnb.yml 中继)──webhook──▶ hub(/v1/in/cnbd)──rules
   - `actions` 端点对 API 派单不记录（total=0）；`commits` 才有货——工作模式 NPC 的 push 记录（行里带构建 sn、sha 就是推上的新 head）；
   - squash 合并后交付 sha 是新建的合并提交，NPC push 的 sha 是 PR head、**不在 main 历史里**，parent 上也没有——从交付提交标题的 `(#N)` 反查 PR 拿 head 再匹配（merge 固定 `{title} (#N)` 正好可用）；
   - shipSha 发布成功时查台账，命中则把 `npc-commit=<npc>@<sha> build:<sn> commits:<n>` 并进 shipped 标注；端点不可用或没参与都不影响发布。
+- **需求→出货全自动（/autoloop build）实测要点**（PR #13 全链路验证）：
+  - PR 里评论 `/autoloop build <需求>`（管理员权限，与 rollback 同名单）→ 派 `api_trigger_deliver_build` 流水线（工作模式 CodeBuddy）；
+  - 开发人设与修复人设分开写：开发段「从 main 新建分支、实现、自己开 PR、不合并」；
+  - CodeBuddy 确实能自主开 PR（标题+完整描述含方案依据/放弃方案），且**永远不要让它合并**——合并留给状态机门禁；
+  - NPC 开的 PR 自动补交付标（作者认出是 CodeBuddy 就 addLabels + 回读验证），opened 中继接管后审查-合并-发布链路无人接管自然走完；
+  - 实测全程：指令 → 开发构建 → 自主开 PR → 自动补标 → 自动审查 approve → 认领合并 → shipped+台账，人工只发两条评论指令。
 
 ## CNB API 端点备忘
 
