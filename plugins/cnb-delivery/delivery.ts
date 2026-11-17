@@ -118,7 +118,7 @@ async function npcLedger(cnb: Cnb, sha: string): Promise<Record<string, string>>
     if (!hit) return {};
     const who = hit.npc_name ?? "npc";
     const fix = typeof hit.commits_count === "number" ? ` commits:${hit.commits_count}` : "";
-    return { "npc-commit": `${who}@${String(hit.sha).slice(0, 10)} build:${String(hit.sn).slice(-10)}${fix}` };
+    return { "npc-commit": `${who}@${String(hit.sha).slice(0, 10)} build:${hit.sn}${fix}` };
   } catch {
     return {};
   }
