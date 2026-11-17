@@ -5,7 +5,7 @@
 import type { Cnb, Pull } from "./cnb.ts";
 import { liveRelease, type Settings } from "./project.ts";
 import { reviewInput, scopeFromFiles, submitVerdict, type Finding, type Reviewed } from "./review.ts";
-import { startNpcReview, classifyBuild, type NpcRoute } from "./npc.ts";
+import { startNpcReview, startNpcFix, fixEventOf, classifyBuild, type NpcRoute } from "./npc.ts";
 
 export type { NpcRoute };
 
@@ -156,7 +156,20 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
     const outcome = await submitVerdict(cnb, number, head, reviewed, MARK(head));
     if ("changed" in outcome) return { text: `#${number} 审查期间提交变了，下一轮重开`, exit: 2 };
     if (Array.isArray(reviewed) && reviewed.length) {
-      // 有问题：request_changes 已提交（分支保护会挡住合并），保留标签等作者推新提交
+      // 有问题：request_changes 已提交（分支保护会挡住合并）。NPC 路线开着且项目配了修复轮数时，
+      // 顺手把发现派给工作模式的 CodeBuddy：修完 push 新 head 自动重开审查；超轮数上限才退回人工。
+      const fixEvent = options.npc ? fixEventOf(options.npc) : null;
+      const rounds = config.review.fixRounds ?? 0;
+      if (fixEvent && rounds > 0) {
+        const done = (await cnb.builds(fixEvent, "")).length; // 按事件计数修复轮数（含其它 PR，粗粒度但足够防死循环）
+        if (done < rounds) {
+          const { sn } = await startNpcFix(cnb, fixEvent, number, head, String(pr.head?.ref ?? ""), reviewed);
+          await cnb.annotate(head, { "npc-fix-dispatched": `build:${sn} round:${done + 1}` });
+          options.notify?.(`#${number} 审查发现 ${reviewed.length} 个问题，已派 NPC 修复（第 ${done + 1} 轮，${sn}）`);
+          return { text: `#${number} 审查发现 ${reviewed.length} 个问题，已派 NPC 修复（${sn || "构建已受理"}）`, exit: 2 };
+        }
+        await cnb.annotate(head, { "npc-fix-exhausted": `rounds:${done}` }).catch(() => {});
+      }
       options.notify?.(`#${number} 审查发现 ${reviewed.length} 个问题，已挡下`);
       return { text: `#${number} 审查发现 ${reviewed.length} 个问题，挡下等修复`, exit: 0 };
     }

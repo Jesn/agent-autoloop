@@ -70,3 +70,52 @@ export async function npcReviewHealth(cnb: Cnb, sn: string): Promise<"running" |
   const status = await cnb.buildStatus(sn);
   return classifyBuild(String(status?.status ?? ""));
 }
+
+/** 修复触发事件：审查事件名尾部的 review 换成 fix（api_trigger_deliver_review → api_trigger_deliver_fix）。
+ *  事件名对不上说明项目没配修复流水线，返回 null 让调用方跳过自动修复、照旧退回人工。 */
+export function fixEventOf(route: NpcRoute): string | null {
+  return /review$/.test(route.event) ? route.event.replace(/review$/, "fix") : null;
+}
+
+/** 修复提示词：把审查发现原样喂给 NPC，让它以工作模式直接改 PR 源分支。 */
+export function npcFixPrompt(
+  number: number,
+  head: string,
+  branch: string,
+  findings: Array<{ title: string; text: string }>,
+): string {
+  const list = findings.map((f, i) => `${i + 1}. ${f.title}\n${f.text}`).join("\n");
+  return [
+    `${list}` ? `审查在合并请求 #${number}（head 提交 ${head.slice(0, 10)}）发现问题，请直接修复：` : "",
+    list,
+    "要求：只修列出的问题和与之直接相关的代码，不动无关文件；",
+    `修完把改动推回源分支 ${branch}（推送会自动触发重新审查），不要发新 PR、不要合并；`,
+    "推完在原 PR 下评论一条修复说明（改了什么、为什么）；某条问题经核实不成立的，说明理由后跳过。",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** 召唤 NPC 修复：与审查同为 api_trigger 流水线，但开工作模式——默认只读的 NPC token 提权到可写可推。 */
+export async function startNpcFix(
+  cnb: Cnb,
+  fixEvent: string,
+  number: number,
+  head: string,
+  branch: string,
+  findings: Array<{ title: string; text: string }>,
+): Promise<{ sn: string }> {
+  if (!/^api_trigger_/.test(fixEvent)) throw new Error(`NPC 修复触发事件必须以 api_trigger_ 开头：${fixEvent}`);
+  const started = await cnb.startBuild({
+    event: fixEvent,
+    branch,
+    sha: head,
+    env: {
+      DELIVERY_PR: String(number),
+      DELIVERY_HEAD: head,
+      DELIVERY_USER_PROMPT: npcFixPrompt(number, head, branch, findings),
+    },
+    npc: { name: "CodeBuddy", workMode: true },
+  });
+  return { sn: String(started?.sn ?? "") };
+}

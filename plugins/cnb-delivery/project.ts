@@ -20,6 +20,8 @@ export type Settings = {
     command?: string[];
     agents: Record<string, Reviewer | null>;
     trusted: string[];
+    /** 审查发现问题后允许 NPC 工作模式自动修复的轮数上限（超过退回人工）；0/缺省 = 不自动修 */
+    fixRounds?: number;
   };
   health?: { url: string; require: Record<string, unknown>; field: string; pattern: string };
 };
