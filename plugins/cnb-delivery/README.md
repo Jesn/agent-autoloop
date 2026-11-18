@@ -43,8 +43,17 @@ CNB 流水线(.cnb.yml 中继)──webhook──▶ hub(/v1/in/cnbd)──rules
 | `/autoloop rollback <sha>` | admin_merge（未配置时退到 PR 作者） | 直接触发回滚流水线：startBuild 内联 YAML 在 main 头 revert 目标提交并推送，push 链路自动接力出新 shipped 标注；目标提交打 `rollback-triggered` 标注 + PR 评论回执带构建号 |
 | `/autoloop build <需求>` | admin_merge（同 rollback 名单） | 需求→出货全自动：派工作模式 CodeBuddy 从零实现（建分支/写码/自主开 PR），NPC 作者的 PR 自动补交付标后进入审查-合并-发布链路；实现见 `startNpcDev` + `api_trigger_deliver_build` 流水线段 |
 | `/autoloop status` | 任何人 | 只读盘点交付进度并回评论：PR 状态/阶段（已发布/已合并/审查结论/修复中）/审查构建/修复轮数/台账与回滚记录；不碰状态机、不触发构建，merged/closed 也能查。已知局限：squash 合并的 shipped 标注在合并提交上（不在 PR head），已合并的 PR 盘点会提示去 main 提交看标注 |
+| `/autoloop cross-review` | 任何人 | 手动追加一轮交叉复核：按首轮结论自动选模式（approve→找岔挑漏 challenge，打回→逐条核实 findings verify）；结论与本轮对照，一致自动定夺，分歧标 `cross-review-split` 转人工仲裁 |
 
 执行结果都回复到 PR 评论里留痕。同一指令重放被幂等挡（防刷，带不同尾注如 `status 2` 可重新触发）。
+
+### 交叉复核（玩法 B 前置：第二只眼）
+
+配置 `review.crossReview`（`off` 默认 / `on-reject` 打回才复核 / `always` 每轮都复核），PR 打 `cross-review` 标签单点强制。首轮结论回来后自动派第二只眼（`api_trigger_deliver_cross` 流水线段，与审查/修复同族）：打回后 verify 模式逐条核实 findings 是否成立，approve 后 challenge 模式专门挑漏。两轮一致自动定夺（CR+CR 照旧进修复，approve+approve 照旧合并）；分歧不猜谁对，标 `cross-review-split` 转人工仲裁（评论里带双方意见折叠原文）。
+
+**实测（PR #14，timeout=-9 全自动链路）**：首轮审查 CR「交付审查」→ 自动派交叉复核 verify → 复核确认「成立。核实依据：…timeout = 3 改为 timeout = -9」（CR）→ 两轮一致 → NPC 修复第 1 轮把 timeout 修回 3 → 新 head 重审 approve → squash 合并 → push 中继发布成功 → `shipped` 台账标注落 main。人工干预只有 4 条 `/autoloop retry` 推进评论。
+
+同版本修复防重：修复轮数按**当前 head** 计数（同 head 最多 fixRounds 次，跨 PR 不互相挤占；全局计数会因历史 PR 用光名额）。
 
 ### 网络鲁棒性
 
