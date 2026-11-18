@@ -59,6 +59,14 @@ CNB 流水线(.cnb.yml 中继)──webhook──▶ hub(/v1/in/cnbd)──rules
 
 CNB API 调用（`api()`）内置传输层重试（fetch failed/超时自动重试 2 次，指数退避）；业务错误（4xx/5xx）照旧抛给门禁/退避逻辑处理。宿主机到 api.cnb.cool 的连接偶发重置时，单次失败不再导致整轮 run 失败。
 
+### 中文编码纪律（曾三次踩坑）
+
+Windows 下 MSYS bash 传参给原生 exe（git.exe / curl.exe）偶发编码降级（UTF-8 → GBK），中文提交信息/PR 标题变乱码且**已写入的对象无法无损修复**（PR 标题可 PATCH，提交历史改写会动 sha 影响台账）。铁律：**凡含中文的 `git commit` 一律 `git commit -F <utf8文件>`；凡含中文的 `curl -d` 一律 `--data-binary @<utf8文件>`；文件用 write 工具写（不经 bash 传参）**。插件自身的 API 调用走 node fetch（内部 UTF-8）不受影响。
+
+### 交付心跳（审查结论没有平台事件，靠定时班次接管）
+
+CNB 的**评审提交不触发任何流水线**——审查/复核结论异步回来后，等待中的轮次不会被唤醒（PR #10–#14 全靠人工 `/autoloop retry` 推进）。修复：hub 侧加「CNB 交付心跳」规则（`*/10 * * * *`），`run.ts` 识别无事项指向的轮次（schedule.tick / run.manual）后**扫 open 且带交付标的 PR 各跑一遍状态机**；`deliverOnce` 天然幂等（已合并/无事可做的 PR 静默跳过），扫全量安全。配合 hub 对 failed 轮的自动退避重试（5min×2ⁿ 封顶 60min），PR #15 实测全链路零人工：开 PR → 中继派审查 → LGTM → **心跳班次自动合并** → push 中继自动核实发布，全程无一条 retry 指令。
+
 ## 仓库接线（ops/delivery.json）
 
 ```json

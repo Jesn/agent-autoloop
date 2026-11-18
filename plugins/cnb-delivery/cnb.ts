@@ -88,6 +88,16 @@ export class Cnb {
 
   // ---- 合并请求 ----
 
+  /** open 状态的 PR 列表（心跳轮扫进行中的交付用） */
+  openPulls(): Promise<Array<{ number: number; labels?: Array<{ name: string }> }>> {
+    return this.api("/pulls?state=open&per_page=50").then((items: any) =>
+      (Array.isArray(items) ? items : items?.items ?? []).map((item: any) => ({
+        number: Number(item.number ?? item.id ?? 0),
+        labels: (item.labels ?? []).map((label: any) => ({ name: String(label?.name ?? label) })),
+      })),
+    );
+  }
+
   pull(number: number): Promise<Pull> {
     return this.api(`/pulls/${number}`);
   }

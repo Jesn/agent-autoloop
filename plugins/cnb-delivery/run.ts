@@ -81,18 +81,43 @@ export async function runWith(cnb: Cnb, repo: string): Promise<{ text: string; e
     const receipt = await commandReceipt(cnb, config, cmdNumber(String(cmdEvent.subject)), { ...parsed, by }, String((await cnb.pull(cmdNumber(String(cmdEvent.subject)))).head?.sha ?? ""), options);
     return { text: receipt.text, exit: receipt.exit === 1 ? 1 : 0 };
   }
+  // 心跳轮（定时/手动触发，事件不指向任何事项）：扫 open 且带交付标的 PR 各跑一遍状态机。审查/复核结论回来
+  // 没有平台事件可唤醒等待中的轮次（CNB 评审提交不触发流水线），靠这班心跳接管推进；
+  // deliverOnce 天然幂等（已合并/无事可做的 PR 静默跳过），扫全量安全。
+  const events = context.events ?? [];
+  const hasSubject = events.some((event: any) => {
+    const subject = String(event.subject ?? "");
+    return subject === repo || new RegExp(`^${esc}#\\d+$`).test(subject);
+  });
+  if (events.length && !hasSubject) {
+    const pulls = await cnb.openPulls();
+    const targets = pulls.filter((pull) => pull.labels?.some((label) => label.name === "deliver")).map((pull) => pull.number);
+    if (!targets.length) return { text: "心跳：没有进行中的交付", exit: 0 };
+    const lines: string[] = [];
+    for (const number of targets) {
+      try {
+        const receipt = await deliverOnce(cnb, config, number, options);
+        lines.push(receipt.text.startsWith(`#${number}`) ? receipt.text : `#${number} ${receipt.text}`);
+      } catch (error) {
+        lines.push(`#${number} 本轮跳过（${error instanceof Error ? error.message : error}）`);
+      }
+    }
+    return { text: lines.join("\n"), exit: 0 };
+  }
   // push 事件：subject 就是仓库，从事件的 sha/summary/detail 里提出提交号进发布核实；其余按 PR 编号走状态机
-  const subjects = [...new Set((context.events ?? []).map((event: any) => String(event.subject ?? "")))];
+  const subjects = [...new Set(events.map((event: any) => String(event.subject ?? "")))];
+  // 心跳扫不到但事件指向了仓库（如 push 中继）：按原路径走
   if (subjects.length === 1 && subjects[0] === repo) {
     const sha = String(
-      context.events.find((event: any) => /^[a-f0-9]{7,40}$/.test(String(event.sha ?? "")))?.sha
-        ?? context.events.find((event: any) => /^[a-f0-9]{7,40}$/.test(String(event.summary ?? "")))?.summary
-        ?? context.events.map((event: any) => /提交：([a-f0-9]{7,40})/.exec(String(event.detail ?? ""))?.[1]).find(Boolean)
+      events.find((event: any) => /^[a-f0-9]{7,40}$/.test(String(event.sha ?? "")))?.sha
+        ?? events.find((event: any) => /^[a-f0-9]{7,40}$/.test(String(event.summary ?? "")))?.summary
+        ?? events.map((event: any) => /提交：([a-f0-9]{7,40})/.exec(String(event.detail ?? ""))?.[1]).find(Boolean)
         ?? "",
     );
     if (!/^[a-f0-9]{7,40}$/.test(sha)) throw new Error("push 事件里没有可用的提交号");
     return await shipSha(cnb, config, sha, options);
   }
+  // 心跳分支已提前接管 schedule 轮；这里处理事件轮（评论/PR/push）
   const receipt = await deliverOnce(cnb, config, subjectNumber(repo, context), options);
   return { text: receipt.text, exit: receipt.exit === 1 ? 1 : 0 };
 }
