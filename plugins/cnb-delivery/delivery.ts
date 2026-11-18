@@ -154,7 +154,8 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
     if (String(error).includes("404")) return { text: `#${number} 不存在或没权限`, exit: 1 };
     throw error;
   }
-  if (pr.state === "merged") return ship(cnb, config, pr, options);
+  // 已合并的（CNB 语义 state="closed"+is_merged=true，两者都要认）：走发布核实
+  if (pr.state === "merged" || pr.is_merged) return ship(cnb, config, pr, options);
   if (pr.state === "closed") return { text: `#${number} 已关闭，没事可做`, exit: 2 };
   // NPC 开的 PR 自动补交付标：作者认出是平台 NPC（CodeBuddy）就视为交付，无需人工打标——
   // 标签 API 有假成功，POST 后回读确认；补上了顺势继续走状态机，没补上（权限/端点问题）就照旧等人工
@@ -248,15 +249,104 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
 // PR 里评论 /autoloop <cmd>，经中继进 hub 后路由到独立 subject（repo#N@cmd@…）——
 // 不挂到状态机的退避 run 上，指令即刻新起一轮。
 
-export type Command = { cmd: "retry" | "skip-review" | "rollback" | "build"; arg: string; by: string };
+export type Command = { cmd: "retry" | "skip-review" | "rollback" | "build" | "status"; arg: string; by: string };
 
 /** 从中继事件的 detail/summary 里解出指令；不是指令返回 null */
 export function parseCommand(text: string): { cmd: Command["cmd"]; arg: string } | null {
   const hit = /^\s*\/autoloop\s+(\S+)(?:\s+([\s\S]+))?$/m.exec(text);
   if (!hit) return null;
   const cmd = hit[1].toLowerCase();
-  if (cmd !== "retry" && cmd !== "skip-review" && cmd !== "rollback" && cmd !== "build") return null;
+  if (cmd !== "retry" && cmd !== "skip-review" && cmd !== "rollback" && cmd !== "build" && cmd !== "status") return null;
   return { cmd, arg: (hit[2] ?? "").trim() };
+}
+
+/** /autoloop status：只读盘点交付进度，拼成人话回评论；不碰状态机，merged/closed 也能查。
+ *  每段独立兕底，单项查询失败只降级成一行提示，不炸整条回复。 */
+async function statusReport(cnb: Cnb, config: Settings, number: number, pr: Pull, options: DeliveryOptions): Promise<string> {
+  const head = String(pr.head?.sha ?? "");
+  const short = head.slice(0, 10) || "?";
+  const lines: string[] = [];
+  const stateText = pr.state === "merged" ? "已合并" : pr.state === "closed" ? "已关闭" : "进行中";
+  const labels = pr.labels.map((l) => l.name);
+  lines.push(`PR：${stateText}（作者 ${String(pr.author?.username ?? "?")}，${labels.length ? labels.join("/") : "无标签"}）`);
+
+  const marks = await cnb.annotations(head).catch(() => []);
+  const mark = (key: string) => marks.find((x) => x.key === key)?.value ?? "";
+
+  // 阶段判定：先看标注（最权威），没有再按 PR 状态推
+  const shipped = mark("shipped");
+  // CNB 语义：已合并的 PR state="closed" + is_merged=true，两者都要认
+  const wasMerged = pr.state === "merged" || pr.is_merged;
+  if (shipped) {
+    lines.push(`阶段：✅ 已发布（shipped=${shipped.slice(0, 40)}）`);
+  } else if (wasMerged) {
+    lines.push("阶段：✅ 已合并，部署核实中");
+    try {
+      const deploys = await cnb.builds(config.ship.pipeline, head);
+      const latest = deploys.find((b) => b.sha && (head.startsWith(b.sha.slice(0, 10)) || b.sha.startsWith(head.slice(0, 10))));
+      if (!latest) lines.push(`　　└ 没查到 ${config.ship.pipeline} 构建记录`);
+      else if (["pending", "running", ""].includes(latest.status)) lines.push(`　　└ 部署构建进行中（${latest.sn}）`);
+      else if (latest.status === "success") lines.push(`　　└ 构建成功，等下一轮核线上版本（${latest.sn}）`);
+      else lines.push(`　　└ 部署构建失败（${latest.sn} 状态 ${latest.status}）`);
+    } catch {
+      lines.push("　　└ 部署构建查询失败");
+    }
+  } else if (pr.state === "closed") {
+    lines.push("阶段：已关闭（未合并），没有后续动作");
+  } else {
+    // open：审查结论定阶段
+    let reviewed = false;
+    try {
+      const reviews = await cnb.reviews(number);
+      const mine = reviews.filter((r: any) => typeof r.body === "string" && r.body.startsWith(MARK(head)));
+      const last = mine.at(-1) as { state: string } | undefined;
+      if (last) {
+        reviewed = true;
+        if (last.state === "approved") lines.push("阶段：✅ 审查已通过，等认领合并（发 /autoloop retry）");
+        else {
+          const dispatched = mark("npc-fix-dispatched");
+          lines.push(dispatched
+            ? `阶段：⛔ 审查已打回，修复中（${dispatched}）`
+            : mark("npc-fix-exhausted")
+              ? `阶段：⛔ 审查已打回，修复轮数用尽（${mark("npc-fix-exhausted")}），退回人工`
+              : "阶段：⛔ 审查已打回，等修复派单/作者修复（发 /autoloop retry 触发）");
+        }
+      }
+    } catch {
+      lines.push("　　└ 审查查询失败");
+    }
+    if (!reviewed) lines.push("阶段：还没审查结论（未派单或审查构建进行中）");
+  }
+
+  // 审查/修复构建记录（NPC 路线才有）
+  if (options.npc) {
+    try {
+      const dispatched = await cnb.builds(options.npc.event, head);
+      if (dispatched.length) {
+        const d = dispatched.at(-1)!;
+        const statusText = d.status === "success" ? "成功" : d.status === "error" ? "失败" : d.status || "进行中";
+        lines.push(`审查构建：${d.sn}（${statusText}）`);
+      }
+    } catch {
+      /* 审查构建查不到就略过 */
+    }
+    const fixEvent = fixEventOf(options.npc);
+    if (fixEvent) {
+      try {
+        const rounds = (await cnb.builds(fixEvent, "")).length;
+        if (rounds) lines.push(`修复派单累计：${rounds} 轮（全局计数，上限 ${config.review.fixRounds ?? 0}）`);
+      } catch {
+        /* 同上 */
+      }
+    }
+  }
+
+  const npcCommit = mark("npc-commit");
+  if (npcCommit) lines.push(`台账：${npcCommit}`);
+  else if (wasMerged) lines.push("台账：无（交付标注在合并提交上，不在 PR head）");
+  const rollback = mark("rollback-triggered");
+  if (rollback) lines.push(`回滚记录：${rollback}`);
+  return `交付状态盘点（head ${short}）：\n\n${lines.map((l, i) => `${i + 1}. ${l}`).join("\n")}`;
 }
 
 /** 执行一条评论指令。commenter 是发评论的账号；by 回执正文在 reply 里同步到 PR */
@@ -273,6 +363,12 @@ export async function commandReceipt(
   const pr = await cnb.pull(number);
   const admins = config.admin_merge.length ? config.admin_merge : [String(pr.author?.username ?? "")];
   const admin = admins.includes(by);
+  if (cmd === "status") {
+    // 只读查询：不判权限不碰状态，谁都能问
+    const report = await statusReport(cnb, config, number, pr, options);
+    await cnb.createComment(number, report);
+    return { text: `#${number} 状态已回评论`, exit: 0 };
+  }
   if (cmd === "rollback" && !admin)
     return await refuse(cnb, number, `回滚只有管理员（${admins.join(", ")}）能发起，${by || "未知账号"} 不在名单里`);
   if (cmd === "rollback") {

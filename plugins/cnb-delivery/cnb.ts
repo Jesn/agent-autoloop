@@ -52,24 +52,38 @@ export class Cnb {
 
   async api(path: string, body?: unknown, method = body === undefined ? "GET" : "POST"): Promise<any> {
     const url = `${this.apiBase}/${this.repo}/-${path}`;
-    const response = await fetch(url, {
-      method,
-      headers: {
-        accept: "application/vnd.cnb.api+json",
-        authorization: `Bearer ${this.token}`,
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(30_000),
-    });
-    const text = await response.text();
-    const data = text ? JSON.parse(text) : null;
-    if (!response.ok) {
-      const message = typeof data?.message === "string" ? data.message : text.slice(0, 200);
-      if (HICCUP_STATUS.has(response.status)) throw new CnbHiccup(response.status, `${response.status} ${message}`);
-      throw new Error(`${response.status} ${message}`);
+    // 网络抖动重试：宿主机到 api.cnb.cool 偶发 fetch failed（DNS/连接重置），这类传输层失败
+    // 与业务状态无关，重试安全；4xx/5xx 交给上层 HICCUP/门禁逻辑处理，这里不碰
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt) await new Promise((done) => setTimeout(done, attempt * 800));
+        const response = await fetch(url, {
+          method,
+          headers: {
+            accept: "application/vnd.cnb.api+json",
+            authorization: `Bearer ${this.token}`,
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: AbortSignal.timeout(30_000),
+        });
+        const text = await response.text();
+        const data = text ? JSON.parse(text) : null;
+        if (!response.ok) {
+          const message = typeof data?.message === "string" ? data.message : text.slice(0, 200);
+          if (HICCUP_STATUS.has(response.status)) throw new CnbHiccup(response.status, `${response.status} ${message}`);
+          throw new Error(`${response.status} ${message}`);
+        }
+        return data;
+      } catch (error) {
+        // 只重试传输层失败（TypeError: fetch failed / 超时），业务错误（含 HICCUP）直接抛
+        const transient = error instanceof TypeError || String(error).includes("aborted") || String(error).includes("TimeoutError");
+        if (!transient) throw error;
+        lastError = error;
+      }
     }
-    return data;
+    throw lastError;
   }
 
   // ---- 合并请求 ----
@@ -168,6 +182,13 @@ export class Cnb {
   annotate(sha: string, entries: Record<string, string>): Promise<void> {
     const annotations = Object.entries(entries).map(([key, value]) => ({ key, value }));
     return this.api(`/git/commit-annotations/${sha}`, { annotations }, "PUT").then(() => undefined);
+  }
+
+  /** 读提交标注（/autoloop status 盘点用）；没有标注时端点报 404/空都归一成空数组。 */
+  annotations(sha: string): Promise<Array<{ key: string; value: string }>> {
+    return this.api(`/git/commit-annotations/${encodeURIComponent(sha)}`)
+      .then((list: any) => (Array.isArray(list) ? list : []).map((x: any) => ({ key: String(x?.key ?? ""), value: String(x?.value ?? "") })))
+      .catch(() => []);
   }
 
   // ---- 构建（检查与部署流水线）----

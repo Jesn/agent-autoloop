@@ -1,6 +1,6 @@
 # cnb-delivery — CNB 平台的自动交付插件
 
-把 CNB 仓库的 PR 交付流程交给 agent-autoloop 中台驱动：**打开感知 → 审查（免审/代理审查/作者声明免审）→ 合并门禁 → 发布核实 → shipped 标注**，外加一套 PR 评论指令通道（retry / skip-review / rollback）。
+把 CNB 仓库的 PR 交付流程交给 agent-autoloop 中台驱动：**打开感知 → 审查（免审/代理审查/作者声明免审）→ 合并门禁 → 发布核实 → shipped 标注**，外加一套 PR 评论指令通道（retry / skip-review / rollback / build / status）。
 
 插件自包含（不引上级目录），两处部署：
 - hub 容器：`/data/plugins/cnb-delivery/`（source.ts 提供事件源适配）
@@ -41,8 +41,14 @@ CNB 流水线(.cnb.yml 中继)──webhook──▶ hub(/v1/in/cnbd)──rules
 | `/autoloop retry` | 任何人 | 新起一轮状态机（指令走独立 subject，不被退避 run 压住） |
 | `/autoloop skip-review <理由>` | PR 作者或 admin_merge | 写入绑定提交号的免审声明评论 → 状态机识别 exempt 免审；推新提交后声明自动作废 |
 | `/autoloop rollback <sha>` | admin_merge（未配置时退到 PR 作者） | 直接触发回滚流水线：startBuild 内联 YAML 在 main 头 revert 目标提交并推送，push 链路自动接力出新 shipped 标注；目标提交打 `rollback-triggered` 标注 + PR 评论回执带构建号 |
+| `/autoloop build <需求>` | admin_merge（同 rollback 名单） | 需求→出货全自动：派工作模式 CodeBuddy 从零实现（建分支/写码/自主开 PR），NPC 作者的 PR 自动补交付标后进入审查-合并-发布链路；实现见 `startNpcDev` + `api_trigger_deliver_build` 流水线段 |
+| `/autoloop status` | 任何人 | 只读盘点交付进度并回评论：PR 状态/阶段（已发布/已合并/审查结论/修复中）/审查构建/修复轮数/台账与回滚记录；不碰状态机、不触发构建，merged/closed 也能查。已知局限：squash 合并的 shipped 标注在合并提交上（不在 PR head），已合并的 PR 盘点会提示去 main 提交看标注 |
 
-执行结果都回复到 PR 评论里留痕。同一指令重放被幂等挡（防刷）。
+执行结果都回复到 PR 评论里留痕。同一指令重放被幂等挡（防刷，带不同尾注如 `status 2` 可重新触发）。
+
+### 网络鲁棒性
+
+CNB API 调用（`api()`）内置传输层重试（fetch failed/超时自动重试 2 次，指数退避）；业务错误（4xx/5xx）照旧抛给门禁/退避逻辑处理。宿主机到 api.cnb.cool 的连接偶发重置时，单次失败不再导致整轮 run 失败。
 
 ## 仓库接线（ops/delivery.json）
 
