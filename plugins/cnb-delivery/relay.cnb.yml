@@ -119,3 +119,17 @@ $:
               按需求实现改动（最小聚焦，只动相关文件），提交推送，然后向 main 开 Pull Request，
               描述写清需求到实现的对应关系。不要合并 PR——审查与合并由交付中台接管。
             userPrompt: ${DELIVERY_USER_PROMPT}
+  api_trigger_deliver_cross:
+    # 交叉复核：首轮审查结论（approve/打回）回来后，中台自动派第二只眼——打回后核实每条 findings
+    # 是否成立（verify），approve 后换找岔人设挑漏（challenge）；两轮一致自动定夺，分歧标人工仲裁。
+    # 也可在 PR 里评论 /autoloop cross-review 手动触发。复核模式由 userPrompt 区分。
+    - docker:
+        image: cnbcool/default-npc:latest
+      stages:
+        - name: NPC 交叉复核
+          type: npc:go
+          options:
+            systemPrompt: >-
+              你是仓库的交叉复核员。严格按用户提示词执行：核实或独立复查指定 PR 的改动，
+              并按提示词要求的标记格式（交叉复核）提交评审。只看事实与依据，不迎合任何一方的结论。
+            userPrompt: ${DELIVERY_USER_PROMPT}

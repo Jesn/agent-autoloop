@@ -5,7 +5,7 @@
 import type { Cnb, Pull } from "./cnb.ts";
 import { liveRelease, type Settings } from "./project.ts";
 import { reviewInput, scopeFromFiles, submitVerdict, type Finding, type Reviewed } from "./review.ts";
-import { startNpcReview, startNpcFix, startNpcDev, fixEventOf, classifyBuild, type NpcRoute } from "./npc.ts";
+import { startNpcReview, startNpcFix, startNpcDev, startNpcCross, fixEventOf, crossEventOf, classifyBuild, type NpcRoute } from "./npc.ts";
 
 export type { NpcRoute };
 
@@ -34,6 +34,19 @@ async function ownReview(cnb: Cnb, number: number, head: string) {
   return mine.at(-1) as { state: string; body?: string } | undefined;
 }
 
+// 交叉复核评审标记（与首轮交付审查区分）；标签名 cross-review 打了就强制复核这条 PR
+const CROSS_MARK = (head: string) => `交叉复核（${head.slice(0, 10)}）`;
+const CROSS_LABEL = "cross-review";
+
+/** 本条 PR 要不要交叉复核（首轮结论已知时用）：标签 > always > on-reject（仅打回时） */
+function shouldCross(pr: Pull, config: Settings, firstState: string): boolean {
+  if (pr.labels.some((label) => label.name === CROSS_LABEL)) return true;
+  const mode = config.review.crossReview ?? "off";
+  if (mode === "always") return true;
+  if (mode === "on-reject" && firstState !== "approved") return true;
+  return false;
+}
+
 async function verdict(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOptions): Promise<Reviewed> {
   const number = Number(pr.number);
   const files = await cnb.files(number);
@@ -41,11 +54,52 @@ async function verdict(cnb: Cnb, config: Settings, pr: Pull, options: DeliveryOp
   if (!scope.needsReview) return { docsOnly: true };
   const skip = await findSkipReview(cnb, config, number, pr.head.sha, String(pr.author?.username ?? ""));
   if (skip) return { exempt: skip };
-  const prior = await ownReview(cnb, number, pr.head.sha);
-  if (prior)
-    return prior.state === "approved"
+  const head = pr.head.sha;
+  const reviews = await cnb.reviews(number);
+  const first = reviews.filter((review: any) => typeof review.body === "string" && review.body.startsWith(MARK(head))).at(-1) as
+    | { state: string; body?: string }
+    | undefined;
+  const cross = reviews.filter((review: any) => typeof review.body === "string" && review.body.startsWith(CROSS_MARK(head))).at(-1) as
+    | { state: string; body?: string }
+    | undefined;
+  // 复核结论已回：两轮一致就按首轮走；分歧（一轮 approve 一轮打回）不猜谁对，标 split 转人工仲裁
+  if (first && cross) {
+    if (first.state === cross.state) {
+      return first.state === "approved" ? [] : { blockedByReview: String(first.body ?? "") };
+    }
+    const marks = await cnb.annotations(head).catch(() => []);
+    if (!marks.some((m) => m.key === "cross-review-split" && m.value.includes(head.slice(0, 10)))) {
+      await cnb.annotate(head, { "cross-review-split": `first:${first.state} cross:${cross.state}` }).catch(() => {});
+      await cnb
+        .createComment(
+          number,
+          `⚠️ 两轮审查结论不一致，转人工仲裁：\n\n- 首轮审查：**${first.state}**\n- 交叉复核：**${cross.state}**\n\n<details><summary>首轮意见</summary>\n\n${String(first.body ?? "").slice(0, 600)}\n\n</details>\n<details><summary>复核意见</summary>\n\n${String(cross.body ?? "").slice(0, 600)}\n\n</details>\n请人工看完两边意见后下结论（同意哪边就在 PR 里留个言），或推新提交重开审查。`,
+        )
+        .catch(() => {});
+    }
+    return { waiting: `两轮审查结论不一致（首轮 ${first.state} / 复核 ${cross.state}），已转人工仲裁` };
+  }
+  // 首轮结论已回、还没复核：配置/标签命中就先派复核（去重靠 api_trigger 构建记录），复核回来再定夺
+  if (first && shouldCross(pr, config, first.state)) {
+    const crossEvent = options.npc ? crossEventOf(options.npc) : null;
+    if (crossEvent) {
+      const dispatched = await cnb.builds(crossEvent, head);
+      if (dispatched.length) {
+        const health = classifyBuild(dispatched[0].status);
+        if (health === "error") throw new Refusal(`交叉复核构建失败（${dispatched[0].sn}），请检查 ${crossEvent} 流水线`);
+        return { waiting: `交叉复核进行中（${dispatched[0].sn}），结果回来后继续` };
+      }
+      const mode = first.state === "approved" ? "challenge" : "verify";
+      const { sn } = await startNpcCross(cnb, crossEvent, number, head, String(pr.head?.ref ?? ""), mode, String(first.body ?? ""));
+      await cnb.annotate(head, { "cross-review-dispatched": `build:${sn} mode:${mode} first:${first.state}` }).catch(() => {});
+      options.notify?.(`#${number} 首轮 ${first.state}，已派交叉复核（${mode}，${sn}）`);
+      return { waiting: `首轮 ${first.state}，交叉复核（${mode}）已派出（${sn}）` };
+    }
+  }
+  if (first)
+    return first.state === "approved"
       ? []
-      : { blockedByReview: String(prior.body ?? "") };
+      : { blockedByReview: String(first.body ?? "") };
   if (!options.review) throw new Refusal("没有可用的审查执行者");
   const points = await cnb.file("main", config.review.points);
   const input = reviewInput(files, points, pr.body || undefined);
@@ -197,7 +251,7 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
       const fixEvent = options.npc ? fixEventOf(options.npc) : null;
       const rounds = config.review.fixRounds ?? 0;
       if (fixEvent && rounds > 0) {
-        const done = (await cnb.builds(fixEvent, "")).length; // 按事件计数修复轮数（含其它 PR，粗粒度但足够防死循环）
+        const done = (await cnb.builds(fixEvent, head)).length; // 按当前 head 计数：同版本最多 rounds 次，跨 PR 不互相挤占
         if (done < rounds) {
           const findings = [{ title: `上轮审查意见（PR #${number}）`, text: reviewed.blockedByReview }];
           const { sn } = await startNpcFix(cnb, fixEvent, number, head, String(pr.head?.ref ?? ""), findings);
@@ -217,7 +271,7 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
       const fixEvent = options.npc ? fixEventOf(options.npc) : null;
       const rounds = config.review.fixRounds ?? 0;
       if (fixEvent && rounds > 0) {
-        const done = (await cnb.builds(fixEvent, "")).length; // 按事件计数修复轮数（含其它 PR，粗粒度但足够防死循环）
+        const done = (await cnb.builds(fixEvent, head)).length; // 按当前 head 计数：同版本最多 rounds 次，跨 PR 不互相挤占
         if (done < rounds) {
           const { sn } = await startNpcFix(cnb, fixEvent, number, head, String(pr.head?.ref ?? ""), reviewed);
           await cnb.annotate(head, { "npc-fix-dispatched": `build:${sn} round:${done + 1}` });
@@ -249,14 +303,14 @@ export async function deliverOnce(cnb: Cnb, config: Settings, number: number, op
 // PR 里评论 /autoloop <cmd>，经中继进 hub 后路由到独立 subject（repo#N@cmd@…）——
 // 不挂到状态机的退避 run 上，指令即刻新起一轮。
 
-export type Command = { cmd: "retry" | "skip-review" | "rollback" | "build" | "status"; arg: string; by: string };
+export type Command = { cmd: "retry" | "skip-review" | "rollback" | "build" | "status" | "cross-review"; arg: string; by: string };
 
 /** 从中继事件的 detail/summary 里解出指令；不是指令返回 null */
 export function parseCommand(text: string): { cmd: Command["cmd"]; arg: string } | null {
   const hit = /^\s*\/autoloop\s+(\S+)(?:\s+([\s\S]+))?$/m.exec(text);
   if (!hit) return null;
   const cmd = hit[1].toLowerCase();
-  if (cmd !== "retry" && cmd !== "skip-review" && cmd !== "rollback" && cmd !== "build" && cmd !== "status") return null;
+  if (cmd !== "retry" && cmd !== "skip-review" && cmd !== "rollback" && cmd !== "build" && cmd !== "status" && cmd !== "cross-review") return null;
   return { cmd, arg: (hit[2] ?? "").trim() };
 }
 
@@ -333,8 +387,8 @@ async function statusReport(cnb: Cnb, config: Settings, number: number, pr: Pull
     const fixEvent = fixEventOf(options.npc);
     if (fixEvent) {
       try {
-        const rounds = (await cnb.builds(fixEvent, "")).length;
-        if (rounds) lines.push(`修复派单累计：${rounds} 轮（全局计数，上限 ${config.review.fixRounds ?? 0}）`);
+        const rounds = (await cnb.builds(fixEvent, head)).length;
+        if (rounds) lines.push(`修复派单累计：${rounds} 轮（当前 head，上限 ${config.review.fixRounds ?? 0}）`);
       } catch {
         /* 同上 */
       }
@@ -405,6 +459,23 @@ export async function commandReceipt(
       return await refuse(cnb, number, `免审声明只有 PR 作者或管理员能发，${by || "未知账号"} 不行`);
     await cnb.createComment(number, `${SKIP_MARK(head)}${arg || "作者显式免审"}\n声明人：${by}`);
     // 声明落库后直接跑一轮状态机：verdict 会认到声明走 exempt
+  }
+  if (cmd === "cross-review") {
+    // 手动追加一轮交叉复核：不配置 crossReview 也能用。复核模式按首轮结论自动选（approve→找岔 / 打回→核实）
+    const crossEvent = options.npc ? crossEventOf(options.npc) : null;
+    if (!crossEvent) return await refuse(cnb, number, "没有可用的交叉复核路线（需 NPC 审查路线 + api_trigger_deliver_cross 流水线段）");
+    const reviews = await cnb.reviews(number);
+    const first = reviews.filter((review: any) => typeof review.body === "string" && review.body.startsWith(MARK(head))).at(-1) as
+      | { state: string; body?: string }
+      | undefined;
+    if (!first) return await refuse(cnb, number, "首轮审查还没有结论，无从复核；等审查完成后再发");
+    const dispatched = await cnb.builds(crossEvent, head);
+    if (dispatched.length) return await refuse(cnb, number, `这条 head 已派过交叉复核（${dispatched[0].sn}），等结果回来即可`);
+    const mode = first.state === "approved" ? "challenge" : "verify";
+    const { sn } = await startNpcCross(cnb, crossEvent, number, head, String(pr.head?.ref ?? ""), mode, String(first.body ?? ""));
+    await cnb.annotate(head, { "cross-review-dispatched": `build:${sn} mode:${mode} first:${first.state} by:${by}` }).catch(() => {});
+    await cnb.createComment(number, `交叉复核已派出（${mode} 模式，构建 ${sn}）：复核结论回来后与本轮「${first.state}」对照，一致则自动定夺，分歧转人工仲裁。`);
+    return { text: `#${number} 交叉复核已派出（${sn}）`, exit: 0 };
   }
   if (cmd === "build") {
     // 需求派单：召唤工作模式的 CodeBuddy 从零实现并自己开 PR。权限与 rollback 同级（管理员名单）；

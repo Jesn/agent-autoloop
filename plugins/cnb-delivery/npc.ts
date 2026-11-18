@@ -84,6 +84,60 @@ export function fixEventOf(route: NpcRoute): string | null {
   return /review$/.test(route.event) ? route.event.replace(/review$/, "fix") : null;
 }
 
+/** 交叉复核事件名：与审查/修复同族（api_trigger_deliver_cross），无审查路线时返回 null */
+export function crossEventOf(route: NpcRoute): string | null {
+  return /review$/.test(route.event) ? route.event.replace(/review$/, "cross") : null;
+}
+
+/** 交叉复核的用户提示词。verify = 核实首轮 findings 是否成立；challenge = 首轮 approve 后找岔挑漏。 */
+export function npcCrossPrompt(
+  mode: "verify" | "challenge",
+  number: number,
+  head: string,
+  firstBody: string,
+): string {
+  const short = head.slice(0, 10);
+  if (mode === "verify") {
+    return [
+      `交叉复核任务：此前一次代码审查对本 PR #${number}（head ${short}）给出了 request_changes，意见全文如下：`,
+      "",
+      firstBody,
+      "",
+      "请逐条核实每条问题是否真实成立：定位到对应代码/文件，确认问题位置、触发条件与后果是否与描述一致。",
+      `全部成立：提交 request_changes，评审标题用「交叉复核（${short}）」，body 逐条写「成立」及核实依据。`,
+      `只要有一条不成立：提交 approve，标题同样「交叉复核（${short}）」，body 写明哪些条不成立及核实依据（成立与否都要写）。`,
+    ].join("\n");
+  }
+  return [
+    `交叉复核任务（找岔模式）：本 PR #${number}（head ${short}）此前一次审查结论是 approve。`,
+    "请独立审查本 PR 的全部改动，专门找第一轮可能漏掉的问题：只有会导致结果错误、数据损失、权限或发布事故的才算阻塞问题。",
+    `没有新的阻塞问题：提交 approve，评审标题用「交叉复核（${short}）」，body 写明你重点核查过的方面。`,
+    `发现新的阻塞问题：提交 request_changes，标题同上，body 列出每条问题的位置、触发条件和后果。`,
+  ].join("\n");
+}
+
+/** 召唤 NPC 交叉复核：与审查同族的 api_trigger 流水线（只读人设，不开工作模式）。 */
+export async function startNpcCross(
+  cnb: Cnb,
+  crossEvent: string,
+  number: number,
+  head: string,
+  branchRaw: string,
+  mode: "verify" | "challenge",
+  firstBody: string,
+): Promise<{ sn: string }> {
+  if (!/^api_trigger_/.test(crossEvent)) throw new Error(`交叉复核触发事件必须以 api_trigger_ 开头：${crossEvent}`);
+  const branch = plainBranch(branchRaw);
+  const started = await cnb.startBuild({
+    event: crossEvent,
+    branch,
+    sha: head,
+    env: { DELIVERY_PR: String(number), DELIVERY_HEAD: head, DELIVERY_USER_PROMPT: npcCrossPrompt(mode, number, head, firstBody) },
+    npc: { name: "CodeBuddy" },
+  });
+  return { sn: String(started?.sn ?? "") };
+}
+
 /** 修复提示词：把审查发现原样喂给 NPC，让它以工作模式直接改 PR 源分支。 */
 export function npcFixPrompt(
   number: number,

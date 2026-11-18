@@ -22,6 +22,9 @@ export type Settings = {
     trusted: string[];
     /** 审查发现问题后允许 NPC 工作模式自动修复的轮数上限（超过退回人工）；0/缺省 = 不自动修 */
     fixRounds?: number;
+    /** 交叉复核：off = 不复核（默认）；on-reject = 首轮打回后复核 findings 是否成立；
+     *  always = 每轮结论都复核（approve 换找岔人设、打回换核实人设）。PR 标签 cross-review 单点强制。 */
+    crossReview?: "off" | "on-reject" | "always";
   };
   health?: { url: string; require: Record<string, unknown>; field: string; pattern: string };
 };
