@@ -9,11 +9,11 @@
 ## 架构
 
 ```
-CNB 流水线(.cnb.yml 中继)──webhook──▶ hub(/v1/in/cnbd)──rules──▶ worker──▶ run.ts
-     ▲                                    │ facts/events                       │
-     │                                    ▼                                    ▼
-     └── poll.ts 兜底轮询(NDJSON)    状态机每轮重读 CNB 实况 ◀────────────  CNB API
-                                                                          (cnb.ts)
+CNB 流水线(.cnb.yml 中继)──MQTT(QoS1)──▶ EMQX ──▶ 订阅桥──▶ hub(/v1/in/cnbd)──rules──▶ worker──▶ run.ts
+     ▲                                       │          (mqtt-subscribe)  │ facts/events       │
+     │                                       └─ HTTP 直推兜底（MQTT 失败才走）▼                    ▼
+     └── poll.ts 兜底轮询(NDJSON)             状态机每轮重读 CNB 实况 ◀────────────  CNB API
+                                                                                       (cnb.ts)
 ```
 
 - **无自有状态**：每轮 deliverOnce 都从 CNB 回读 PR 实况再行动；head 漂移、标签被撤、已被别人合并都安全。
@@ -67,16 +67,22 @@ Windows 下 MSYS bash 传参给原生 exe（git.exe / curl.exe）偶发编码降
 
 ### 交付心跳（审查结论没有平台事件，靠定时班次接管）
 
-CNB 的**评审提交不触发任何流水线**——审查/复核结论异步回来后，等待中的轮次不会被唤醒（PR #10–#14 全靠人工 `/autoloop retry` 推进）。修复：hub 侧加「CNB 交付心跳」规则（`*/10 * * * *`），`run.ts` 识别无事项指向的轮次（schedule.tick / run.manual）后**扫 open 且带交付标的 PR 各跑一遍状态机**；`deliverOnce` 天然幂等（已合并/无事可做的 PR 静默跳过），扫全量安全。配合 hub 对 failed 轮的自动退避重试（5min×2ⁿ 封顶 60min），PR #15 实测全链路零人工：开 PR → 中继派审查 → LGTM → **心跳班次自动合并** → push 中继自动核实发布，全程无一条 retry 指令。
+CNB 的**评审提交不触发任何流水线**——审查/复核结论异步回来后，等待中的轮次不会被唤醒（PR #10–#14 全靠人工 `/autoloop retry` 推进）。修复：hub 侧加「CNB 交付心跳」规则（`*/10 * * * *`），`run.ts` 识别无事项指向的轮次（schedule.tick / run.manual）后**扫 open 且带交付标的 PR 各跑一遍状态机**；`deliverOnce` 天然幂等（已合并/无事可做的 PR 静默跳过），扫全量安全。配合 hub 对 failed 轮的自动退避重试（5min×2ⁿ 封顶 60min），PR #15 实测全链路零人工：开 PR → 中继派审查 → LGTM → **心跳班次自动合并** → push 中继自动核实发布，全程无一条 retry 指令。PR #16 二次复测（MQTT 通道）：连 retry 都没有，update 事件直接驱动派审查，心跳合并后 push 中继自动闭环到 shipped 标注。
 
 ### 事件中继通道：MQTT 主通道 + HTTP 兜底（实测零 devtunnel 全链路）
 
-CNB 流水线到 hub 的事件中继原来是纯 HTTP（hub 需公网入口，devtunnel 隧道当跳板，丢事件且要养隧道）。已切 MQTT：流水线内 `mqtt-relay.mjs` 出站 TLS 发布到 EMQX Cloud Serverless（QoS1 等 PUBACK，~0.5s），hub 侧订阅桥收消息转投 `/v1/in/cnbd`。实测 push 事件全链路：**CNB runner → EMQX（杭州）→ 宿主桥 → hub 发布核实 → 构建成功已发布**，devtunnel 零参与。
+CNB 流水线到 hub 的事件中继原来是纯 HTTP（hub 需公网入口，devtunnel 隧道当跳板，丢事件且要养隧道）。已切 MQTT：流水线内 `mqtt-relay.mjs` 出站 TLS 发布到 EMQX Cloud Serverless（QoS1 等 PUBACK，~0.5s），hub 侧订阅桥收消息转投 `/v1/in/cnbd`。
 
-可靠性设计：
+**全场景实测（13/13 过，PR #16 全链路零人工）**：四类事件（pr/update/comment/push）全部走 MQTT 实测；PR #16 从开出到 shipped 全程零人工——开 PR（无标忽略）→ 补交付标 → update 事件驱动派 NPC 审查（≈2min approve）→ 心跳班次自动合并（squash）→ push MQTT → 构建核实 → shipped 标注落 main。
+
+可靠性设计（全部实测验证）：
 - **桥持久会话**（`clean:false` + QoS1）：hub 宕机期间 broker 攒批，桥恢复后补送；桥本地投递失败重试 3 次（3s 退避），之后放弃靠心跳/轮询兜底。
 - **幂等安全**：MQTT 成功后 HTTP 兜底重发也无害，hub 按 sha/内容判重。
-- **HTTP 兜底保留**：MQTT 故障时 curl 直推仍接得住（试点仓库两通道都配，MQTT 失败才 curl）。
+- **HTTP 兜底保留**：MQTT 故障时 curl 直推仍接得住（试点仓库两通道都配，MQTT 失败才 curl；发布器凭据错误/连接失败退出码非零，`\|\|` 兑底必然触发）。
+
+运维注意（实测踩出来的）：
+- **QoS1 PUBACK 超时 ≠ 发布失败**：消息可能已入 broker（at-least-once），重试会产生同内容双消息——桥补推两条、hub 幂等吸收，链路自洽无丢失。
+- **桥重启后 ~60s 内新连接可能被 EMQX 限流**（Serverless 免费额度，会话释放慢）：重启桥要留间隔；流水线侧无感（MQTT 失败即回落 HTTP）。
 
 hub 侧部署（Windows 宿主）：
 1. EMQX Cloud「访问控制→客户端认证」建桥凭据；
@@ -157,4 +163,5 @@ PR      POST /{repo}/-/pulls                GET /{repo}/-/pulls/{n}
 开 PR 无标签 → 静默等待 ✓ ・ docs-only 免审 → 合并 → shipped 标注 ✓ ・
 检查构建进行中 → waiting 等待 ✓ ・ 构建完成 → 发布核实 ✓ ・
 skip-review 声明 → 免审合并 → shipped ✓ ・ rollback 指令 → 权限校验 → 标注登记（含拒绝路径）✓ ・
-重复事件/已合并 PR → 幂等「没事可做」✓ ・ 中继重放 → duplicate ✓ ・ 指令重放 → 防刷 ✓
+重复事件/已合并 PR → 幂等「没事可做」✓ ・ 中继重放 → duplicate ✓ ・ 指令重放 → 防刷 ✓ ・
+**MQTT 全链路（PR #16）**：四类事件中继 → NPC 审查 → 心跳合并 → 发布核实 → shipped ✓（全程零 devtunnel/零人工）
