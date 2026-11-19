@@ -2,7 +2,17 @@
 # 用法：把这几段合进项目自己的 .cnb.yml（缩进对齐 main: 下）；HUB_TOKEN 建议
 # 通过 imports 引用密钥仓库注入，不要硬编码。
 #
-# 实测要点（rich/test/autoloop_cnb 试点验证过）：
+# 通道选择（实测于 EMQX Cloud Serverless + rich/test/autoloop_cnb 试点）：
+# - MQTT 主通道（推荐）：出站 TLS 直连 broker，hub 侧订阅桥收消息转投，
+#   无需 hub 公网入口；QoS1 + 桥持久会话，hub 宕机期间 broker 攒批补送。
+#   需要 ① broker 凭据（EMQX Cloud「访问控制→客户端认证」建用户）；
+#        ② hub 侧跑 plugins/cnb-delivery/mqtt-subscribe.mjs（常驻，见 README）；
+#        ③ 把 plugins/cnb-delivery/mqtt-relay.mjs 拷进项目 ops/（零依赖，runner 有 node 即可）。
+# - HTTP 兜底：hub 必须有公网地址（devtunnel/公网 IP 等）。MQTT 失败自动回落。
+#
+# 实测要点：
+# - CNB 默认 runner 没有 node：走 MQTT 的流水线要显式指定 pipeline 级
+#   `docker: image: node:20-alpine`（与 stages 平级）——stage 级 docker.image 不生效。
 # - CNB 没有给出 PR 编号环境变量（CNB_PULL_INDEX 不存在）；编号从 CNB_EVENT_URL
 #   末段提取（形如 https://cnb.cool/<repo>/-/pulls/1）。
 # - $CNB_COMMIT 在 PR 管道里就是源分支头 sha（不是合并预览 sha）。
@@ -14,37 +24,61 @@
 main:
   # PR 建立/重开：hub 按 subject（仓库#编号）聚合同一 PR 的事件
   pull_request:
-    - stages:
+    - docker:
+        image: node:20-alpine # MQTT 段需要 node；纯 HTTP 通道可去掉这级 image
+      stages:
         - name: relay-to-hub
           env:
+            MQTT_HOST: "" # EMQX 连接地址（如 xxx.ala.cn-hangzhou.emqxsl.cn），空则直接走 HTTP
+            MQTT_PORT: "8883"
+            MQTT_USER: ""
+            MQTT_PASS: $MQTT_PASSWORD # imports 密钥注入
             HUB_URL: https://hub.example.com/v1/in/cnbd
             HUB_TOKEN: $AGENT_AUTOLOOP_SECRET_CNBD # 从 imports 注入
           script: |
             NUM="${CNB_EVENT_URL##*/}"
+            PAYLOAD="{\"event\":\"pull_request\",\"repo\":\"$CNB_REPO_SLUG\",\"number\":\"$NUM\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"$CNB_BRANCH\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+            if [ -n "$MQTT_HOST" ]; then node ops/mqtt-relay.mjs "$MQTT_HOST" "$MQTT_PORT" "$MQTT_USER" "$MQTT_PASS" "autoloop/cnb/pr" "$PAYLOAD" || true; fi
             curl -fsS -X POST "$HUB_URL" \
               -H "x-cnb-token: $HUB_TOKEN" \
               -H "content-type: application/json" \
-              -d "{\"event\":\"pull_request\",\"repo\":\"$CNB_REPO_SLUG\",\"number\":\"$NUM\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"$CNB_BRANCH\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+              -d "$PAYLOAD" || true
+        # 说明：MQTT 成功后 HTTP 仍会重发一次，hub 按 sha 幂等去重，无害。
+        # 想省一次调用可用 `MQTT 成功即跳过 HTTP`（mqtt-relay 失败才 curl，见试点仓库 .cnb.yml）。
 
   # PR 有新提交（synchronize）：通知 hub 更新同一 PR 的状态机
   pull_request.update:
-    - stages:
+    - docker:
+        image: node:20-alpine
+      stages:
         - name: relay-to-hub
           env:
+            MQTT_HOST: ""
+            MQTT_PORT: "8883"
+            MQTT_USER: ""
+            MQTT_PASS: $MQTT_PASSWORD
             HUB_URL: https://hub.example.com/v1/in/cnbd
             HUB_TOKEN: $AGENT_AUTOLOOP_SECRET_CNBD
           script: |
             NUM="${CNB_EVENT_URL##*/}"
+            PAYLOAD="{\"event\":\"pull_request.update\",\"repo\":\"$CNB_REPO_SLUG\",\"number\":\"$NUM\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"$CNB_BRANCH\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+            if [ -n "$MQTT_HOST" ]; then node ops/mqtt-relay.mjs "$MQTT_HOST" "$MQTT_PORT" "$MQTT_USER" "$MQTT_PASS" "autoloop/cnb/pr" "$PAYLOAD" || true; fi
             curl -fsS -X POST "$HUB_URL" \
               -H "x-cnb-token: $HUB_TOKEN" -H "content-type: application/json" \
-              -d "{\"event\":\"pull_request.update\",\"repo\":\"$CNB_REPO_SLUG\",\"number\":\"$NUM\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"$CNB_BRANCH\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+              -d "$PAYLOAD" || true
 
   # PR 评论（含 /autoloop 指令）：hub 侧识别 /autoloop 开头的评论当指令（retry/skip-review/rollback），
   # 其余评论忽略。评论者/内容的环境变量名以 CNB 文档为准，先用环境倾倒法实测
   pull_request.comment:
-    - stages:
+    - docker:
+        image: node:20-alpine
+      stages:
         - name: relay-to-hub
           env:
+            MQTT_HOST: ""
+            MQTT_PORT: "8883"
+            MQTT_USER: ""
+            MQTT_PASS: $MQTT_PASSWORD
             HUB_URL: https://hub.example.com/v1/in/cnbd
             HUB_TOKEN: $AGENT_AUTOLOOP_SECRET_CNBD
           script: |
@@ -55,15 +89,23 @@ main:
   # 合并进 main：通知 hub 进入「等发布、核实线上」阶段
   push:
     - branch-filter: [main]
+      docker:
+        image: node:20-alpine
       stages:
         - name: relay-to-hub
           env:
+            MQTT_HOST: ""
+            MQTT_PORT: "8883"
+            MQTT_USER: ""
+            MQTT_PASS: $MQTT_PASSWORD
             HUB_URL: https://hub.example.com/v1/in/cnbd
             HUB_TOKEN: $AGENT_AUTOLOOP_SECRET_CNBD
           script: |
+            PAYLOAD="{\"event\":\"push\",\"repo\":\"$CNB_REPO_SLUG\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"main\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+            if [ -n "$MQTT_HOST" ]; then node ops/mqtt-relay.mjs "$MQTT_HOST" "$MQTT_PORT" "$MQTT_USER" "$MQTT_PASS" "autoloop/cnb/push" "$PAYLOAD" || true; fi
             curl -fsS -X POST "$HUB_URL" \
               -H "x-cnb-token: $HUB_TOKEN" -H "content-type: application/json" \
-              -d "{\"event\":\"push\",\"repo\":\"$CNB_REPO_SLUG\",\"sha\":\"$CNB_COMMIT\",\"branch\":\"main\",\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+              -d "$PAYLOAD"
 
   # 部署流水线（示例）：真正的构建发布在这里做，hub 靠 build/logs + 健康接口核实
   # api_trigger_deploy:
